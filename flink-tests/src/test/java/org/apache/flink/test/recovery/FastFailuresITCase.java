@@ -18,86 +18,68 @@
 
 package org.apache.flink.test.recovery;
 
-
 import org.apache.flink.api.common.functions.MapFunction;
-import org.apache.flink.api.common.restartstrategy.RestartStrategies;
+import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.java.tuple.Tuple2;
-import org.apache.flink.configuration.ConfigConstants;
-import org.apache.flink.configuration.Configuration;
-import org.apache.flink.runtime.minicluster.LocalFlinkMiniCluster;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.api.functions.sink.SinkFunction;
-import org.apache.flink.streaming.api.functions.source.RichSourceFunction;
+import org.apache.flink.streaming.api.functions.sink.legacy.SinkFunction;
+import org.apache.flink.streaming.api.functions.source.legacy.RichSourceFunction;
+import org.apache.flink.streaming.util.RestartStrategyUtils;
+import org.apache.flink.test.util.AbstractTestBase;
 
-import org.apache.flink.streaming.util.TestStreamEnvironment;
-import org.apache.flink.util.TestLogger;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.concurrent.atomic.AtomicInteger;
 
-import static org.junit.Assert.fail;
+/** Test program with very fast failure rate. */
+class FastFailuresITCase extends AbstractTestBase {
 
-@SuppressWarnings("serial")
-public class FastFailuresITCase extends TestLogger {
+    static final AtomicInteger FAILURES_SO_FAR = new AtomicInteger();
+    static final int NUM_FAILURES = 200;
 
-	static final AtomicInteger FAILURES_SO_FAR = new AtomicInteger();
-	static final int NUM_FAILURES = 200;
-	
-	@Test
-	public void testThis() {
-		final int parallelism = 4;
+    @Test
+    void testThis() throws Exception {
+        final int parallelism = 4;
 
-		Configuration config = new Configuration();
-		config.setInteger(ConfigConstants.LOCAL_NUMBER_TASK_MANAGER, 2);
-		config.setInteger(ConfigConstants.TASK_MANAGER_NUM_TASK_SLOTS, 2);
-		
-		LocalFlinkMiniCluster cluster = new LocalFlinkMiniCluster(config, false);
-		cluster.start();
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
 
-		TestStreamEnvironment env = new TestStreamEnvironment(cluster, parallelism);
-		
-		env.getConfig().disableSysoutLogging();
-		env.setParallelism(parallelism);
-		env.enableCheckpointing(1000);
-		env.getConfig().setRestartStrategy(RestartStrategies.fixedDelayRestart(210, 0));
-		
-		DataStream<Tuple2<Integer, Integer>> input = env.addSource(new RichSourceFunction<Tuple2<Integer, Integer>>() {
+        env.setParallelism(parallelism);
+        env.enableCheckpointing(1000);
+        RestartStrategyUtils.configureFixedDelayRestartStrategy(env, 210, 0L);
 
-			@Override
-			public void open(Configuration parameters) {
-				if (FAILURES_SO_FAR.incrementAndGet() <= NUM_FAILURES) {
-					throw new RuntimeException("fail");
-				}
-			}
+        DataStream<Tuple2<Integer, Integer>> input =
+                env.addSource(
+                        new RichSourceFunction<Tuple2<Integer, Integer>>() {
 
-			@Override
-			public void run(SourceContext<Tuple2<Integer, Integer>> ctx)  {}
+                            @Override
+                            public void open(OpenContext openContext) {
+                                if (FAILURES_SO_FAR.incrementAndGet() <= NUM_FAILURES) {
+                                    throw new RuntimeException("fail");
+                                }
+                            }
 
-			@Override
-			public void cancel() {}
-		});
+                            @Override
+                            public void run(SourceContext<Tuple2<Integer, Integer>> ctx) {}
 
-		input
-				.keyBy(0)
-				.map(new MapFunction<Tuple2<Integer, Integer>, Integer>() {
+                            @Override
+                            public void cancel() {}
+                        });
 
-					@Override
-					public Integer map(Tuple2<Integer, Integer> value) {
-						return value.f0;
-					}
-				})
-				.addSink(new SinkFunction<Integer>() {
-					@Override
-					public void invoke(Integer value) {}
-				});
+        input.keyBy(x -> x.f0)
+                .map(
+                        new MapFunction<Tuple2<Integer, Integer>, Integer>() {
 
-		try {
-			env.execute();
-		}
-		catch (Exception e) {
-			e.printStackTrace();
-			fail(e.getMessage());
-		}
-	}
+                            @Override
+                            public Integer map(Tuple2<Integer, Integer> value) {
+                                return value.f0;
+                            }
+                        })
+                .addSink(
+                        new SinkFunction<Integer>() {
+                            @Override
+                            public void invoke(Integer value) {}
+                        });
+        env.execute();
+    }
 }

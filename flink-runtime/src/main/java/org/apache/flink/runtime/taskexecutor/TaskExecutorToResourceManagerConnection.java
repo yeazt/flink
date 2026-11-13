@@ -18,144 +18,145 @@
 
 package org.apache.flink.runtime.taskexecutor;
 
-import org.apache.flink.api.common.time.Time;
-import org.apache.flink.runtime.clusterframework.types.ResourceID;
-import org.apache.flink.runtime.instance.InstanceID;
 import org.apache.flink.runtime.registration.RegisteredRpcConnection;
 import org.apache.flink.runtime.registration.RegistrationConnectionListener;
-import org.apache.flink.runtime.rpc.RpcService;
 import org.apache.flink.runtime.registration.RegistrationResponse;
 import org.apache.flink.runtime.registration.RetryingRegistration;
+import org.apache.flink.runtime.registration.RetryingRegistrationConfiguration;
 import org.apache.flink.runtime.resourcemanager.ResourceManagerGateway;
-import org.apache.flink.runtime.concurrent.Future;
+import org.apache.flink.runtime.resourcemanager.ResourceManagerId;
+import org.apache.flink.runtime.resourcemanager.TaskExecutorRegistration;
+import org.apache.flink.runtime.rpc.RpcService;
 
-import org.apache.flink.util.Preconditions;
 import org.slf4j.Logger;
 
-import java.util.UUID;
+import java.time.Duration;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
-/**
- * The connection between a TaskExecutor and the ResourceManager.
- */
+/** The connection between a TaskExecutor and the ResourceManager. */
 public class TaskExecutorToResourceManagerConnection
-		extends RegisteredRpcConnection<ResourceManagerGateway, TaskExecutorRegistrationSuccess> {
+        extends RegisteredRpcConnection<
+                ResourceManagerId,
+                ResourceManagerGateway,
+                TaskExecutorRegistrationSuccess,
+                TaskExecutorRegistrationRejection> {
 
-	private final RpcService rpcService;
+    private final RpcService rpcService;
 
-	private final String taskManagerAddress;
+    private final RetryingRegistrationConfiguration retryingRegistrationConfiguration;
 
-	private final ResourceID taskManagerResourceId;
+    private final RegistrationConnectionListener<
+                    TaskExecutorToResourceManagerConnection,
+                    TaskExecutorRegistrationSuccess,
+                    TaskExecutorRegistrationRejection>
+            registrationListener;
 
-	private final SlotReport slotReport;
+    private final TaskExecutorRegistration taskExecutorRegistration;
 
-	private final RegistrationConnectionListener<TaskExecutorRegistrationSuccess> registrationListener;
+    public TaskExecutorToResourceManagerConnection(
+            Logger log,
+            RpcService rpcService,
+            RetryingRegistrationConfiguration retryingRegistrationConfiguration,
+            String resourceManagerAddress,
+            ResourceManagerId resourceManagerId,
+            Executor executor,
+            RegistrationConnectionListener<
+                            TaskExecutorToResourceManagerConnection,
+                            TaskExecutorRegistrationSuccess,
+                            TaskExecutorRegistrationRejection>
+                    registrationListener,
+            TaskExecutorRegistration taskExecutorRegistration) {
 
-	private InstanceID registrationId;
+        super(log, resourceManagerAddress, resourceManagerId, executor);
 
-	private ResourceID resourceManagerResourceId;
+        this.rpcService = checkNotNull(rpcService);
+        this.retryingRegistrationConfiguration = checkNotNull(retryingRegistrationConfiguration);
+        this.registrationListener = checkNotNull(registrationListener);
+        this.taskExecutorRegistration = checkNotNull(taskExecutorRegistration);
+    }
 
-	public TaskExecutorToResourceManagerConnection(
-			Logger log,
-			RpcService rpcService,
-			String taskManagerAddress,
-			ResourceID taskManagerResourceId,
-			SlotReport slotReport,
-			String resourceManagerAddress,
-			UUID resourceManagerLeaderId,
-			Executor executor,
-			RegistrationConnectionListener<TaskExecutorRegistrationSuccess> registrationListener) {
+    @Override
+    protected RetryingRegistration<
+                    ResourceManagerId,
+                    ResourceManagerGateway,
+                    TaskExecutorRegistrationSuccess,
+                    TaskExecutorRegistrationRejection>
+            generateRegistration() {
+        return new TaskExecutorToResourceManagerConnection.ResourceManagerRegistration(
+                log,
+                rpcService,
+                getTargetAddress(),
+                getTargetLeaderId(),
+                retryingRegistrationConfiguration,
+                taskExecutorRegistration);
+    }
 
-		super(log, resourceManagerAddress, resourceManagerLeaderId, executor);
+    @Override
+    protected void onRegistrationSuccess(TaskExecutorRegistrationSuccess success) {
+        log.info(
+                "Successful registration at resource manager {} under registration id {}.",
+                getTargetAddress(),
+                success.getRegistrationId());
 
-		this.rpcService = Preconditions.checkNotNull(rpcService);
-		this.taskManagerAddress = Preconditions.checkNotNull(taskManagerAddress);
-		this.taskManagerResourceId = Preconditions.checkNotNull(taskManagerResourceId);
-		this.slotReport = Preconditions.checkNotNull(slotReport);
-		this.registrationListener = Preconditions.checkNotNull(registrationListener);
-	}
+        registrationListener.onRegistrationSuccess(this, success);
+    }
 
+    @Override
+    protected void onRegistrationRejection(TaskExecutorRegistrationRejection rejection) {
+        registrationListener.onRegistrationRejection(getTargetAddress(), rejection);
+    }
 
-	@Override
-	protected RetryingRegistration<ResourceManagerGateway, TaskExecutorRegistrationSuccess> generateRegistration() {
-		return new TaskExecutorToResourceManagerConnection.ResourceManagerRegistration(
-			log,
-			rpcService,
-			getTargetAddress(),
-			getTargetLeaderId(),
-			taskManagerAddress,
-			taskManagerResourceId,
-			slotReport);
-	}
+    @Override
+    protected void onRegistrationFailure(Throwable failure) {
+        log.info("Failed to register at resource manager {}.", getTargetAddress(), failure);
 
-	@Override
-	protected void onRegistrationSuccess(TaskExecutorRegistrationSuccess success) {
-		log.info("Successful registration at resource manager {} under registration id {}.",
-			getTargetAddress(), success.getRegistrationId());
+        registrationListener.onRegistrationFailure(failure);
+    }
 
-		registrationId = success.getRegistrationId();
-		resourceManagerResourceId = success.getResourceManagerId();
-		registrationListener.onRegistrationSuccess(success);
-	}
+    // ------------------------------------------------------------------------
+    //  Utilities
+    // ------------------------------------------------------------------------
 
-	@Override
-	protected void onRegistrationFailure(Throwable failure) {
-		log.info("Failed to register at resource manager {}.", getTargetAddress(), failure);
+    private static class ResourceManagerRegistration
+            extends RetryingRegistration<
+                    ResourceManagerId,
+                    ResourceManagerGateway,
+                    TaskExecutorRegistrationSuccess,
+                    TaskExecutorRegistrationRejection> {
 
-		registrationListener.onRegistrationFailure(failure);
-	}
+        private final TaskExecutorRegistration taskExecutorRegistration;
 
-	/**
-	 * Gets the ID under which the TaskExecutor is registered at the ResourceManager.
-	 * This returns null until the registration is completed.
-	 */
-	public InstanceID getRegistrationId() {
-		return registrationId;
-	}
+        ResourceManagerRegistration(
+                Logger log,
+                RpcService rpcService,
+                String targetAddress,
+                ResourceManagerId resourceManagerId,
+                RetryingRegistrationConfiguration retryingRegistrationConfiguration,
+                TaskExecutorRegistration taskExecutorRegistration) {
 
-	/**
-	 * Gets the unique id of ResourceManager, that is returned when registration success.
-	 */
-	public ResourceID getResourceManagerId() {
-		return resourceManagerResourceId;
-	}
+            super(
+                    log,
+                    rpcService,
+                    "ResourceManager",
+                    ResourceManagerGateway.class,
+                    targetAddress,
+                    resourceManagerId,
+                    retryingRegistrationConfiguration);
+            this.taskExecutorRegistration = taskExecutorRegistration;
+        }
 
-	// ------------------------------------------------------------------------
-	//  Utilities
-	// ------------------------------------------------------------------------
+        @Override
+        protected CompletableFuture<RegistrationResponse> invokeRegistration(
+                ResourceManagerGateway resourceManager,
+                ResourceManagerId fencingToken,
+                long timeoutMillis)
+                throws Exception {
 
-	private static class ResourceManagerRegistration
-			extends RetryingRegistration<ResourceManagerGateway, TaskExecutorRegistrationSuccess> {
-
-		private final String taskExecutorAddress;
-		
-		private final ResourceID resourceID;
-
-		private final SlotReport slotReport;
-
-		ResourceManagerRegistration(
-				Logger log,
-				RpcService rpcService,
-				String targetAddress,
-				UUID leaderId,
-				String taskExecutorAddress,
-				ResourceID resourceID,
-				SlotReport slotReport) {
-
-			super(log, rpcService, "ResourceManager", ResourceManagerGateway.class, targetAddress, leaderId);
-			this.taskExecutorAddress = checkNotNull(taskExecutorAddress);
-			this.resourceID = checkNotNull(resourceID);
-			this.slotReport = checkNotNull(slotReport);
-		}
-
-		@Override
-		protected Future<RegistrationResponse> invokeRegistration(
-				ResourceManagerGateway resourceManager, UUID leaderId, long timeoutMillis) throws Exception {
-
-			Time timeout = Time.milliseconds(timeoutMillis);
-			return resourceManager.registerTaskExecutor(leaderId, taskExecutorAddress, resourceID, slotReport, timeout);
-		}
-	}
+            Duration timeout = Duration.ofMillis(timeoutMillis);
+            return resourceManager.registerTaskExecutor(taskExecutorRegistration, timeout);
+        }
+    }
 }

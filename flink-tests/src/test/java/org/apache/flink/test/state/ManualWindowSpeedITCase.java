@@ -15,24 +15,31 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.flink.test.state;
 
+import org.apache.flink.api.common.eventtime.AscendingTimestampsWatermarks;
+import org.apache.flink.api.common.eventtime.TimestampAssigner;
+import org.apache.flink.api.common.eventtime.TimestampAssignerSupplier;
+import org.apache.flink.api.common.eventtime.WatermarkGenerator;
+import org.apache.flink.api.common.eventtime.WatermarkGeneratorSupplier;
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.functions.FilterFunction;
 import org.apache.flink.api.common.functions.ReduceFunction;
 import org.apache.flink.api.java.tuple.Tuple2;
-import org.apache.flink.contrib.streaming.state.RocksDBStateBackend;
-import org.apache.flink.runtime.state.filesystem.FsStateBackend;
-import org.apache.flink.runtime.state.memory.MemoryStateBackend;
-import org.apache.flink.streaming.api.TimeCharacteristic;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.api.functions.source.ParallelSourceFunction;
-import org.apache.flink.streaming.api.windowing.time.Time;
-import org.apache.flink.streaming.util.StreamingMultipleProgramsTestBase;
-import org.junit.Ignore;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.TemporaryFolder;
+import org.apache.flink.streaming.api.functions.source.legacy.ParallelSourceFunction;
+import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindows;
+import org.apache.flink.streaming.util.CheckpointStorageUtils;
+import org.apache.flink.streaming.util.StateBackendUtils;
+import org.apache.flink.test.util.AbstractTestBase;
 
+import org.junit.jupiter.api.Disabled;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.io.File;
+import java.time.Duration;
 import java.util.Random;
 
 /**
@@ -43,216 +50,224 @@ import java.util.Random;
  * <p>When doing a release we should manually run theses tests on the version that is to be released
  * and on older version to see if there are performance regressions.
  *
- * <p>When a test is executed it will output how many elements of key {@code "Tuple 0"} have
- * been processed in each window. This gives an estimate of the throughput.
+ * <p>When a test is executed it will output how many elements of key {@code "Tuple 0"} have been
+ * processed in each window. This gives an estimate of the throughput.
  */
-@Ignore
-public class ManualWindowSpeedITCase extends StreamingMultipleProgramsTestBase {
+@Disabled
+public class ManualWindowSpeedITCase extends AbstractTestBase {
 
-	@Rule
-	public TemporaryFolder tempFolder = new TemporaryFolder();
+    @TempDir private File tempFolder;
 
-	@Test
-	public void testTumblingIngestionTimeWindowsWithFsBackend() throws Exception {
-		final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+    @Test
+    void testTumblingIngestionTimeWindowsWithFsBackend() throws Exception {
+        final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
 
-		env.setStreamTimeCharacteristic(TimeCharacteristic.IngestionTime);
-		env.setParallelism(1);
+        env.setParallelism(1);
 
-		String checkpoints = tempFolder.newFolder().toURI().toString();
-		env.setStateBackend(new FsStateBackend(checkpoints));
+        String checkpoints = tempFolder.toURI().toString();
+        StateBackendUtils.configureHashMapStateBackend(env);
+        CheckpointStorageUtils.configureFileSystemCheckpointStorage(env, checkpoints);
 
-		env.addSource(new InfiniteTupleSource(10_000))
-				.keyBy(0)
-				.timeWindow(Time.seconds(3))
-				.reduce(new ReduceFunction<Tuple2<String, Integer>>() {
-					private static final long serialVersionUID = 1L;
+        env.addSource(new InfiniteTupleSource(1_000))
+                .assignTimestampsAndWatermarks(IngestionTimeWatermarkStrategy.create())
+                .keyBy(x -> x.f0)
+                .window(TumblingEventTimeWindows.of(Duration.ofSeconds(3)))
+                .reduce(
+                        new ReduceFunction<Tuple2<String, Integer>>() {
+                            private static final long serialVersionUID = 1L;
 
-					@Override
-					public Tuple2<String, Integer> reduce(Tuple2<String, Integer> value1,
-							Tuple2<String, Integer> value2) throws Exception {
-						return Tuple2.of(value1.f0, value1.f1 + value2.f1);
-					}
-				})
-				.filter(new FilterFunction<Tuple2<String, Integer>>() {
-					private static final long serialVersionUID = 1L;
+                            @Override
+                            public Tuple2<String, Integer> reduce(
+                                    Tuple2<String, Integer> value1, Tuple2<String, Integer> value2)
+                                    throws Exception {
+                                return Tuple2.of(value1.f0, value1.f1 + value2.f1);
+                            }
+                        })
+                .filter(
+                        new FilterFunction<Tuple2<String, Integer>>() {
+                            private static final long serialVersionUID = 1L;
 
-					@Override
-					public boolean filter(Tuple2<String, Integer> value) throws Exception {
-						return value.f0.startsWith("Tuple 0");
-					}
-				})
-				.print();
+                            @Override
+                            public boolean filter(Tuple2<String, Integer> value) throws Exception {
+                                return value.f0.startsWith("Tuple 0");
+                            }
+                        })
+                .print();
 
-		env.execute();
-	}
+        env.execute();
+    }
 
-	@Test
-	public void testTumblingIngestionTimeWindowsWithFsBackendWithLateness() throws Exception {
-		final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+    @Test
+    void testTumblingIngestionTimeWindowsWithFsBackendWithLateness() throws Exception {
+        final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
 
-		env.setStreamTimeCharacteristic(TimeCharacteristic.IngestionTime);
-		env.setParallelism(1);
+        env.setParallelism(1);
 
-		String checkpoints = tempFolder.newFolder().toURI().toString();
-		env.setStateBackend(new FsStateBackend(checkpoints));
+        String checkpoints = tempFolder.toURI().toString();
 
-		env.addSource(new InfiniteTupleSource(10_000))
-				.keyBy(0)
-				.timeWindow(Time.seconds(3))
-				.allowedLateness(Time.seconds(1))
-				.reduce(new ReduceFunction<Tuple2<String, Integer>>() {
-					private static final long serialVersionUID = 1L;
+        StateBackendUtils.configureHashMapStateBackend(env);
+        CheckpointStorageUtils.configureFileSystemCheckpointStorage(env, checkpoints);
 
-					@Override
-					public Tuple2<String, Integer> reduce(Tuple2<String, Integer> value1,
-							Tuple2<String, Integer> value2) throws Exception {
-						return Tuple2.of(value1.f0, value1.f1 + value2.f1);
-					}
-				})
-				.filter(new FilterFunction<Tuple2<String, Integer>>() {
-					private static final long serialVersionUID = 1L;
+        env.addSource(new InfiniteTupleSource(10_000))
+                .assignTimestampsAndWatermarks(IngestionTimeWatermarkStrategy.create())
+                .keyBy(x -> x.f0)
+                .window(TumblingEventTimeWindows.of(Duration.ofSeconds(3)))
+                .allowedLateness(Duration.ofSeconds(1))
+                .reduce(
+                        new ReduceFunction<Tuple2<String, Integer>>() {
+                            private static final long serialVersionUID = 1L;
 
-					@Override
-					public boolean filter(Tuple2<String, Integer> value) throws Exception {
-						return value.f0.startsWith("Tuple 0");
-					}
-				})
-				.print();
+                            @Override
+                            public Tuple2<String, Integer> reduce(
+                                    Tuple2<String, Integer> value1, Tuple2<String, Integer> value2)
+                                    throws Exception {
+                                return Tuple2.of(value1.f0, value1.f1 + value2.f1);
+                            }
+                        })
+                .filter(
+                        new FilterFunction<Tuple2<String, Integer>>() {
+                            private static final long serialVersionUID = 1L;
 
-		env.execute();
-	}
+                            @Override
+                            public boolean filter(Tuple2<String, Integer> value) throws Exception {
+                                return value.f0.startsWith("Tuple 0");
+                            }
+                        })
+                .print();
 
-	@Test
-	public void testTumblingIngestionTimeWindowsWithRocksDBBackend() throws Exception {
-		final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.execute();
+    }
 
-		env.setStreamTimeCharacteristic(TimeCharacteristic.IngestionTime);
-		env.setParallelism(1);
-		
-		env.setStateBackend(new RocksDBStateBackend(new MemoryStateBackend()));
+    @Test
+    void testTumblingIngestionTimeWindowsWithRocksDBBackend() throws Exception {
+        final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
 
-		env.addSource(new InfiniteTupleSource(10_000))
-				.keyBy(0)
-				.timeWindow(Time.seconds(3))
-				.reduce(new ReduceFunction<Tuple2<String, Integer>>() {
-					private static final long serialVersionUID = 1L;
+        env.setParallelism(1);
 
-					@Override
-					public Tuple2<String, Integer> reduce(Tuple2<String, Integer> value1,
-							Tuple2<String, Integer> value2) throws Exception {
-						return Tuple2.of(value1.f0, value1.f1 + value2.f1);
-					}
-				})
-				.filter(new FilterFunction<Tuple2<String, Integer>>() {
-					private static final long serialVersionUID = 1L;
+        StateBackendUtils.configureRocksDBStateBackend(env);
 
-					@Override
-					public boolean filter(Tuple2<String, Integer> value) throws Exception {
-						return value.f0.startsWith("Tuple 0");
-					}
-				})
-				.print();
+        env.addSource(new InfiniteTupleSource(10_000))
+                .assignTimestampsAndWatermarks(IngestionTimeWatermarkStrategy.create())
+                .keyBy(x -> x.f0)
+                .window(TumblingEventTimeWindows.of(Duration.ofSeconds(3)))
+                .reduce(
+                        new ReduceFunction<Tuple2<String, Integer>>() {
+                            private static final long serialVersionUID = 1L;
 
-		env.execute();
-	}
+                            @Override
+                            public Tuple2<String, Integer> reduce(
+                                    Tuple2<String, Integer> value1, Tuple2<String, Integer> value2)
+                                    throws Exception {
+                                return Tuple2.of(value1.f0, value1.f1 + value2.f1);
+                            }
+                        })
+                .filter(
+                        new FilterFunction<Tuple2<String, Integer>>() {
+                            private static final long serialVersionUID = 1L;
 
-	@Test
-	public void testTumblingIngestionTimeWindowsWithRocksDBBackendWithLateness() throws Exception {
-		final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+                            @Override
+                            public boolean filter(Tuple2<String, Integer> value) throws Exception {
+                                return value.f0.startsWith("Tuple 0");
+                            }
+                        })
+                .print();
 
-		env.setStreamTimeCharacteristic(TimeCharacteristic.IngestionTime);
-		env.setParallelism(1);
+        env.execute();
+    }
 
-		env.setStateBackend(new RocksDBStateBackend(new MemoryStateBackend()));
+    @Test
+    void testTumblingIngestionTimeWindowsWithRocksDBBackendWithLateness() throws Exception {
+        final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
 
-		env.addSource(new InfiniteTupleSource(10_000))
-				.keyBy(0)
-				.timeWindow(Time.seconds(3))
-				.allowedLateness(Time.seconds(1))
-				.reduce(new ReduceFunction<Tuple2<String, Integer>>() {
-					private static final long serialVersionUID = 1L;
+        env.setParallelism(1);
 
-					@Override
-					public Tuple2<String, Integer> reduce(Tuple2<String, Integer> value1,
-							Tuple2<String, Integer> value2) throws Exception {
-						return Tuple2.of(value1.f0, value1.f1 + value2.f1);
-					}
-				})
-				.filter(new FilterFunction<Tuple2<String, Integer>>() {
-					private static final long serialVersionUID = 1L;
+        StateBackendUtils.configureRocksDBStateBackend(env);
 
-					@Override
-					public boolean filter(Tuple2<String, Integer> value) throws Exception {
-						return value.f0.startsWith("Tuple 0");
-					}
-				})
-				.print();
+        env.addSource(new InfiniteTupleSource(10_000))
+                .assignTimestampsAndWatermarks(IngestionTimeWatermarkStrategy.create())
+                .keyBy(x -> x.f0)
+                .window(TumblingEventTimeWindows.of(Duration.ofSeconds(3)))
+                .allowedLateness(Duration.ofSeconds(1))
+                .reduce(
+                        new ReduceFunction<Tuple2<String, Integer>>() {
+                            private static final long serialVersionUID = 1L;
 
-		env.execute();
-	}
+                            @Override
+                            public Tuple2<String, Integer> reduce(
+                                    Tuple2<String, Integer> value1, Tuple2<String, Integer> value2)
+                                    throws Exception {
+                                return Tuple2.of(value1.f0, value1.f1 + value2.f1);
+                            }
+                        })
+                .filter(
+                        new FilterFunction<Tuple2<String, Integer>>() {
+                            private static final long serialVersionUID = 1L;
 
-	@Test
-	public void testAlignedProcessingTimeWindows() throws Exception {
-		final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+                            @Override
+                            public boolean filter(Tuple2<String, Integer> value) throws Exception {
+                                return value.f0.startsWith("Tuple 0");
+                            }
+                        })
+                .print();
 
-		env.setStreamTimeCharacteristic(TimeCharacteristic.ProcessingTime);
-		env.setParallelism(1);
+        env.execute();
+    }
 
-		env.setStateBackend(new RocksDBStateBackend(new MemoryStateBackend()));
+    /**
+     * A source that emits elements with a fixed set of keys as fast as possible. Used for rough
+     * performance estimation.
+     */
+    public static class InfiniteTupleSource
+            implements ParallelSourceFunction<Tuple2<String, Integer>> {
+        private static final long serialVersionUID = 1L;
 
-		env.addSource(new InfiniteTupleSource(10_000))
-				.keyBy(0)
-				.timeWindow(Time.seconds(3))
-				.reduce(new ReduceFunction<Tuple2<String, Integer>>() {
-					private static final long serialVersionUID = 1L;
+        private int numKeys;
 
-					@Override
-					public Tuple2<String, Integer> reduce(Tuple2<String, Integer> value1,
-							Tuple2<String, Integer> value2) throws Exception {
-						return Tuple2.of(value1.f0, value1.f1 + value2.f1);
-					}
-				})
-				.filter(new FilterFunction<Tuple2<String, Integer>>() {
-					private static final long serialVersionUID = 1L;
+        private volatile boolean running = true;
 
-					@Override
-					public boolean filter(Tuple2<String, Integer> value) throws Exception {
-						return value.f0.startsWith("Tuple 0");
-					}
-				})
-				.print();
+        public InfiniteTupleSource(int numKeys) {
+            this.numKeys = numKeys;
+        }
 
-		env.execute();
-	}
+        @Override
+        public void run(SourceContext<Tuple2<String, Integer>> out) throws Exception {
+            Random random = new Random(42);
+            while (running) {
+                Tuple2<String, Integer> tuple =
+                        new Tuple2<String, Integer>("Tuple " + (random.nextInt(numKeys)), 1);
+                out.collect(tuple);
+            }
+        }
 
-	/**
-	 * A source that emits elements with a fixed set of keys as fast as possible. Used for
-	 * rough performance estimation.
-	 */
-	public static class InfiniteTupleSource implements ParallelSourceFunction<Tuple2<String, Integer>> {
-		private static final long serialVersionUID = 1L;
+        @Override
+        public void cancel() {
+            this.running = false;
+        }
+    }
 
-		private int numKeys;
+    /**
+     * This {@link WatermarkStrategy} assigns the current system time as the event-time timestamp.
+     * In a real use case you should use proper timestamps and an appropriate {@link
+     * WatermarkStrategy}.
+     */
+    private static class IngestionTimeWatermarkStrategy<T> implements WatermarkStrategy<T> {
 
-		private volatile boolean running = true;
+        private IngestionTimeWatermarkStrategy() {}
 
-		public InfiniteTupleSource(int numKeys) {
-			this.numKeys = numKeys;
-		}
+        public static <T> IngestionTimeWatermarkStrategy<T> create() {
+            return new IngestionTimeWatermarkStrategy<>();
+        }
 
-		@Override
-		public void run(SourceContext<Tuple2<String, Integer>> out) throws Exception {
-			Random random = new Random(42);
-			while (running) {
-				Tuple2<String, Integer> tuple = new Tuple2<String, Integer>("Tuple " + (random.nextInt(numKeys)), 1);
-				out.collect(tuple);
-			}
-		}
+        @Override
+        public WatermarkGenerator<T> createWatermarkGenerator(
+                WatermarkGeneratorSupplier.Context context) {
+            return new AscendingTimestampsWatermarks<>();
+        }
 
-		@Override
-		public void cancel() {
-			this.running = false;
-		}
-	}
+        @Override
+        public TimestampAssigner<T> createTimestampAssigner(
+                TimestampAssignerSupplier.Context context) {
+            return (event, timestamp) -> System.currentTimeMillis();
+        }
+    }
 }

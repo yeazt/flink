@@ -20,84 +20,87 @@ package org.apache.flink.runtime.blob;
 
 import org.apache.flink.configuration.BlobServerOptions;
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.util.NetUtils;
-import org.apache.flink.util.TestLogger;
-import org.junit.Assert;
-import org.junit.Test;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.net.ServerSocket;
+import java.nio.file.Path;
 
-/**
- * Tests to ensure that the BlobServer properly starts on a specified range of available ports.
- */
-public class BlobServerRangeTest extends TestLogger {
-	/**
-	 * Start blob server on 0 = pick an ephemeral port
-	 */
-	@Test
-	public void testOnEphemeralPort() throws IOException {
-		Configuration conf = new Configuration();
-		conf.setString(BlobServerOptions.PORT, "0");
-		BlobServer srv = new BlobServer(conf, new VoidBlobStore());
-		srv.close();
-	}
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.fail;
 
-	/**
-	 * Try allocating on an unavailable port
-	 * @throws IOException
-	 */
-	@Test(expected = IOException.class)
-	public void testPortUnavailable() throws IOException {
-		// allocate on an ephemeral port
-		ServerSocket socket = null;
-		try {
-			socket = new ServerSocket(0);
-		} catch (IOException e) {
-			e.printStackTrace();
-			Assert.fail("An exception was thrown while preparing the test " + e.getMessage());
-		}
+/** Tests to ensure that the BlobServer properly starts on a specified range of available ports. */
+class BlobServerRangeTest {
 
-		Configuration conf = new Configuration();
-		conf.setString(BlobServerOptions.PORT, String.valueOf(socket.getLocalPort()));
+    @TempDir private Path tempDir;
 
-		// this thing is going to throw an exception
-		try {
-			BlobServer srv = new BlobServer(conf, new VoidBlobStore());
-		} finally {
-			socket.close();
-		}
-	}
+    /** Start blob server on 0 = pick an ephemeral port. */
+    @Test
+    void testOnEphemeralPort() throws IOException {
+        Configuration conf = new Configuration();
+        conf.set(BlobServerOptions.PORT, "0");
 
-	/**
-	 * Give the BlobServer a choice of three ports, where two of them
-	 * are allocated
-	 */
-	@Test
-	public void testOnePortAvailable() throws IOException {
-		int numAllocated = 2;
-		ServerSocket[] sockets = new ServerSocket[numAllocated];
-		for(int i = 0; i < numAllocated; i++) {
-			ServerSocket socket = null;
-			try {
-				sockets[i] = new ServerSocket(0);
-			} catch (IOException e) {
-				e.printStackTrace();
-				Assert.fail("An exception was thrown while preparing the test " + e.getMessage());
-			}
-		}
-		int availablePort = NetUtils.getAvailablePort();
-		Configuration conf = new Configuration();
-		conf.setString(BlobServerOptions.PORT, sockets[0].getLocalPort() + "," + sockets[1].getLocalPort() + "," + availablePort);
+        BlobServer server = TestingBlobUtils.createServer(tempDir, conf);
+        server.start();
+        server.close();
+    }
 
-		// this thing is going to throw an exception
-		try {
-			BlobServer srv = new BlobServer(conf, new VoidBlobStore());
-			Assert.assertEquals(availablePort, srv.getPort());
-			srv.close();
-		} finally {
-			sockets[0].close();
-			sockets[1].close();
-		}
-	}
+    /** Try allocating on an unavailable port. */
+    @Test
+    void testPortUnavailable() throws IOException {
+        // allocate on an ephemeral port
+        ServerSocket socket = null;
+        try {
+            socket = new ServerSocket(0);
+        } catch (IOException e) {
+            e.printStackTrace();
+            fail("An exception was thrown while preparing the test " + e.getMessage());
+        }
+
+        Configuration conf = new Configuration();
+        conf.set(BlobServerOptions.PORT, String.valueOf(socket.getLocalPort()));
+
+        // this thing is going to throw an exception
+        try {
+            assertThatThrownBy(() -> TestingBlobUtils.createServer(tempDir, conf))
+                    .isInstanceOf(IOException.class)
+                    .hasMessageStartingWith("Unable to open BLOB Server in specified port range: ");
+        } finally {
+            socket.close();
+        }
+    }
+
+    /** Give the BlobServer a choice of three ports, where two of them are allocated. */
+    @Test
+    void testOnePortAvailable() throws IOException {
+        int numAllocated = 2;
+        ServerSocket[] sockets = new ServerSocket[numAllocated];
+        for (int i = 0; i < numAllocated; i++) {
+            try {
+                sockets[i] = new ServerSocket(0);
+            } catch (IOException e) {
+                e.printStackTrace();
+                fail("An exception was thrown while preparing the test " + e.getMessage());
+            }
+        }
+        Configuration conf = new Configuration();
+        conf.set(
+                BlobServerOptions.PORT,
+                sockets[0].getLocalPort() + "," + sockets[1].getLocalPort() + ",50000-50050");
+
+        // this thing is going to throw an exception
+        try {
+            BlobServer server = TestingBlobUtils.createServer(tempDir, conf);
+            server.start();
+            assertThat(server.getPort()).isBetween(50000, 50050);
+            server.close();
+        } finally {
+            for (int i = 0; i < numAllocated; ++i) {
+                sockets[i].close();
+            }
+        }
+    }
 }

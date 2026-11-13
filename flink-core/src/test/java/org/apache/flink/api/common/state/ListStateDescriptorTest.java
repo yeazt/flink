@@ -19,86 +19,99 @@
 package org.apache.flink.api.common.state;
 
 import org.apache.flink.api.common.ExecutionConfig;
-import org.apache.flink.api.common.TaskInfo;
+import org.apache.flink.api.common.serialization.SerializerConfigImpl;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.base.ListSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.api.java.typeutils.runtime.kryo.KryoSerializer;
-import org.apache.flink.core.fs.Path;
 import org.apache.flink.core.testutils.CommonTestUtils;
 
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
+import java.util.List;
 
-public class ListStateDescriptorTest {
-	
-	@Test
-	public void testValueStateDescriptorEagerSerializer() throws Exception {
+import static org.assertj.core.api.Assertions.assertThat;
 
-		TypeSerializer<String> serializer = new KryoSerializer<>(String.class, new ExecutionConfig());
-		
-		ListStateDescriptor<String> descr = 
-				new ListStateDescriptor<String>("testName", serializer);
-		
-		assertEquals("testName", descr.getName());
-		assertNotNull(descr.getSerializer());
-		assertTrue(descr.getSerializer() instanceof ListSerializer);
-		assertNotNull(descr.getElementSerializer());
-		assertEquals(serializer, descr.getElementSerializer());
+/** Tests for the {@link ListStateDescriptor}. */
+class ListStateDescriptorTest {
 
-		ListStateDescriptor<String> copy = CommonTestUtils.createCopySerializable(descr);
+    @Test
+    void testListStateDescriptor() throws Exception {
 
-		assertEquals("testName", copy.getName());
-		assertNotNull(copy.getSerializer());
-		assertTrue(copy.getSerializer() instanceof ListSerializer);
+        TypeSerializer<String> serializer =
+                new KryoSerializer<>(String.class, new SerializerConfigImpl());
 
-		assertNotNull(copy.getElementSerializer());
-		assertEquals(serializer, copy.getElementSerializer());
-	}
+        ListStateDescriptor<String> descr = new ListStateDescriptor<>("testName", serializer);
 
-	@Test
-	public void testValueStateDescriptorLazySerializer() throws Exception {
-		// some different registered value
-		ExecutionConfig cfg = new ExecutionConfig();
-		cfg.registerKryoType(TaskInfo.class);
+        assertThat(descr.getName()).isEqualTo("testName");
+        assertThat(descr.getSerializer()).isNotNull();
+        assertThat(descr.getSerializer()).isInstanceOf(ListSerializer.class);
+        assertThat(descr.getElementSerializer()).isNotNull();
+        assertThat(descr.getElementSerializer()).isEqualTo(serializer);
 
-		ListStateDescriptor<Path> descr =
-				new ListStateDescriptor<Path>("testName", Path.class);
-		
-		try {
-			descr.getSerializer();
-			fail("should cause an exception");
-		} catch (IllegalStateException ignored) {}
+        ListStateDescriptor<String> copy = CommonTestUtils.createCopySerializable(descr);
 
-		descr.initializeSerializerUnlessSet(cfg);
+        assertThat(copy.getName()).isEqualTo("testName");
+        assertThat(copy.getSerializer()).isNotNull();
+        assertThat(copy.getSerializer()).isInstanceOf(ListSerializer.class);
 
-		assertNotNull(descr.getSerializer());
-		assertTrue(descr.getSerializer() instanceof ListSerializer);
+        assertThat(copy.getElementSerializer()).isNotNull();
+        assertThat(copy.getElementSerializer()).isEqualTo(serializer);
+    }
 
-		assertNotNull(descr.getElementSerializer());
-		assertTrue(descr.getElementSerializer() instanceof KryoSerializer);
+    @Test
+    void testHashCodeEquals() throws Exception {
+        final String name = "testName";
 
-		assertTrue(((KryoSerializer<?>) descr.getElementSerializer()).getKryo().getRegistration(TaskInfo.class).getId() > 0);
-	}
+        ListStateDescriptor<String> original = new ListStateDescriptor<>(name, String.class);
+        ListStateDescriptor<String> same = new ListStateDescriptor<>(name, String.class);
+        ListStateDescriptor<String> sameBySerializer =
+                new ListStateDescriptor<>(name, StringSerializer.INSTANCE);
 
-	@Test
-	public void testValueStateDescriptorAutoSerializer() throws Exception {
+        // test that hashCode() works on state descriptors with initialized and uninitialized
+        // serializers
+        assertThat(same).hasSameHashCodeAs(original);
+        assertThat(sameBySerializer).hasSameHashCodeAs(original);
 
-		ListStateDescriptor<String> descr =
-				new ListStateDescriptor<String>("testName", String.class);
+        assertThat(same).isEqualTo(original);
+        assertThat(sameBySerializer).isEqualTo(original);
 
-		ListStateDescriptor<String> copy = CommonTestUtils.createCopySerializable(descr);
+        // equality with a clone
+        ListStateDescriptor<String> clone = CommonTestUtils.createCopySerializable(original);
+        assertThat(clone).isEqualTo(original);
 
-		assertEquals("testName", copy.getName());
+        // equality with an initialized
+        clone.initializeSerializerUnlessSet(new ExecutionConfig());
+        assertThat(clone).isEqualTo(original);
 
-		assertNotNull(copy.getSerializer());
-		assertTrue(copy.getSerializer() instanceof ListSerializer);
+        original.initializeSerializerUnlessSet(new ExecutionConfig());
+        assertThat(same).isEqualTo(original);
+    }
 
-		assertNotNull(copy.getElementSerializer());
-		assertEquals(StringSerializer.INSTANCE, copy.getElementSerializer());
-	}
+    /**
+     * FLINK-6775.
+     *
+     * <p>Tests that the returned serializer is duplicated. This allows to share the state
+     * descriptor.
+     */
+    @Test
+    void testSerializerDuplication() {
+        // we need a serializer that actually duplicates for testing (a stateful one)
+        // we use Kryo here, because it meets these conditions
+        TypeSerializer<String> statefulSerializer =
+                new KryoSerializer<>(String.class, new SerializerConfigImpl());
+
+        ListStateDescriptor<String> descr = new ListStateDescriptor<>("foobar", statefulSerializer);
+
+        TypeSerializer<String> serializerA = descr.getElementSerializer();
+        TypeSerializer<String> serializerB = descr.getElementSerializer();
+
+        // check that the retrieved serializers are not the same
+        assertThat(serializerB).isNotSameAs(serializerA);
+
+        TypeSerializer<List<String>> listSerializerA = descr.getSerializer();
+        TypeSerializer<List<String>> listSerializerB = descr.getSerializer();
+
+        assertThat(listSerializerB).isNotSameAs(listSerializerA);
+    }
 }

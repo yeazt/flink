@@ -18,32 +18,34 @@
 
 package org.apache.flink.runtime.blob;
 
+import org.apache.flink.api.common.ApplicationID;
 import org.apache.flink.api.common.JobID;
 
 import java.io.File;
 import java.io.IOException;
 
-/**
- * View on blobs stored in a {@link BlobStore}.
- */
+/** View on blobs stored in a {@link BlobStore}. */
 public interface BlobView {
 
-	/**
-	 * Copies a blob to a local file.
-	 *
-	 * @param blobKey   The blob ID
-	 * @param localFile The local file to copy to
-	 * @throws IOException If the copy fails
-	 */
-	void get(BlobKey blobKey, File localFile) throws IOException;
+    /**
+     * Copies a blob to a local file.
+     *
+     * @param jobId ID of the job this blob belongs to (or <tt>null</tt> if job-unrelated)
+     * @param blobKey The blob ID
+     * @param localFile The local file to copy to
+     * @return whether the file was copied (<tt>true</tt>) or not (<tt>false</tt>)
+     * @throws IOException If the copy fails
+     */
+    boolean get(JobID jobId, BlobKey blobKey, File localFile) throws IOException;
 
-	/**
-	 * Copies a blob to a local file.
-	 *
-	 * @param jobId     The JobID part of ID for the blob
-	 * @param key       The String part of ID for the blob
-	 * @param localFile The local file to copy to
-	 * @throws IOException If the copy fails
-	 */
-	void get(JobID jobId, String key, File localFile) throws IOException;
+    /**
+     * Copies a blob to a local file.
+     *
+     * @param applicationId ID of the application this blob belongs to
+     * @param blobKey The blob ID
+     * @param localFile The local file to copy to
+     * @return whether the file was copied (<tt>true</tt>) or not (<tt>false</tt>)
+     * @throws IOException If the copy fails
+     */
+    boolean get(ApplicationID applicationId, BlobKey blobKey, File localFile) throws IOException;
 }

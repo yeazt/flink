@@ -18,119 +18,131 @@
 
 package org.apache.flink.runtime.jobmanager;
 
-import org.apache.flink.configuration.ConfigConstants;
+import org.apache.flink.api.common.JobStatus;
+import org.apache.flink.api.common.time.Deadline;
+import org.apache.flink.client.program.ClusterClient;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.MetricOptions;
-import org.apache.flink.metrics.jmx.JMXReporter;
+import org.apache.flink.core.testutils.OneShotLatch;
+import org.apache.flink.metrics.jmx.JMXReporterFactory;
+import org.apache.flink.runtime.execution.Environment;
 import org.apache.flink.runtime.jobgraph.JobGraph;
+import org.apache.flink.runtime.jobgraph.JobGraphBuilder;
 import org.apache.flink.runtime.jobgraph.JobVertex;
-import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobgraph.tasks.AbstractInvokable;
-import org.apache.flink.runtime.jobgraph.tasks.ExternalizedCheckpointSettings;
+import org.apache.flink.runtime.jobgraph.tasks.CheckpointCoordinatorConfiguration;
 import org.apache.flink.runtime.jobgraph.tasks.JobCheckpointingSettings;
-import org.apache.flink.runtime.testingUtils.TestingCluster;
-import org.apache.flink.runtime.testingUtils.TestingJobManagerMessages;
+import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
+import org.apache.flink.test.junit5.InjectClusterClient;
+import org.apache.flink.test.junit5.MiniClusterExtension;
+import org.apache.flink.testutils.TestingUtils;
+import org.apache.flink.testutils.executor.TestExecutorExtension;
+import org.apache.flink.util.concurrent.FutureUtils;
+import org.apache.flink.util.concurrent.ScheduledExecutorServiceAdapter;
 
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import javax.management.MBeanServer;
 import javax.management.ObjectName;
 
 import java.lang.management.ManagementFactory;
-import java.util.Collections;
+import java.time.Duration;
 import java.util.Set;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
-import scala.concurrent.Await;
-import scala.concurrent.Future;
-import scala.concurrent.duration.Deadline;
-import scala.concurrent.duration.FiniteDuration;
+import static org.assertj.core.api.Assertions.assertThat;
 
-import static org.junit.Assert.assertEquals;
+/** Tests to verify JMX reporter functionality on the JobManager. */
+class JMXJobManagerMetricTest {
 
-/**
- * Tests to verify JMX reporter functionality on the JobManager.
- */
-public class JMXJobManagerMetricTest {
-	/**
-	 * Tests that metrics registered on the JobManager are actually accessible via JMX.
-	 *
-	 * @throws Exception
-	 */
-	@Test
-	public void testJobManagerJMXMetricAccess() throws Exception {
-		Deadline deadline = new FiniteDuration(2, TimeUnit.MINUTES).fromNow();
-		Configuration flinkConfiguration = new Configuration();
+    @RegisterExtension
+    static final TestExecutorExtension<ScheduledExecutorService> EXECUTOR_RESOURCE =
+            TestingUtils.defaultExecutorExtension();
 
-		flinkConfiguration.setString(MetricOptions.REPORTERS_LIST, "test");
-		flinkConfiguration.setString(ConfigConstants.METRICS_REPORTER_PREFIX + "test." + ConfigConstants.METRICS_REPORTER_CLASS_SUFFIX, JMXReporter.class.getName());
-		flinkConfiguration.setString(ConfigConstants.METRICS_REPORTER_PREFIX + "test.port", "9060-9075");
+    @RegisterExtension
+    private static final MiniClusterExtension MINI_CLUSTER_RESOURCE =
+            new MiniClusterExtension(
+                    new MiniClusterResourceConfiguration.Builder()
+                            .setConfiguration(getConfiguration())
+                            .setNumberSlotsPerTaskManager(1)
+                            .setNumberTaskManagers(1)
+                            .build());
 
-		flinkConfiguration.setString(MetricOptions.SCOPE_NAMING_JM_JOB, "jobmanager.<job_name>");
+    private static Configuration getConfiguration() {
+        Configuration flinkConfiguration = new Configuration();
 
-		TestingCluster flink = new TestingCluster(flinkConfiguration);
+        MetricOptions.forReporter(flinkConfiguration, "test")
+                .set(MetricOptions.REPORTER_FACTORY_CLASS, JMXReporterFactory.class.getName());
+        flinkConfiguration.set(MetricOptions.SCOPE_NAMING_JM_JOB, "jobmanager.<job_name>");
 
-		try {
-			flink.start();
+        return flinkConfiguration;
+    }
 
-			JobVertex sourceJobVertex = new JobVertex("Source");
-			sourceJobVertex.setInvokableClass(BlockingInvokable.class);
+    /** Tests that metrics registered on the JobManager are actually accessible via JMX. */
+    @Test
+    void testJobManagerJMXMetricAccess(@InjectClusterClient ClusterClient<?> client)
+            throws Exception {
+        Deadline deadline = Deadline.now().plus(Duration.ofMinutes(2));
 
-			JobGraph jobGraph = new JobGraph("TestingJob", sourceJobVertex);
-			jobGraph.setSnapshotSettings(new JobCheckpointingSettings(
-				Collections.<JobVertexID>emptyList(),
-				Collections.<JobVertexID>emptyList(),
-				Collections.<JobVertexID>emptyList(),
-				500, 500, 50, 5, ExternalizedCheckpointSettings.none(), null, true));
+        try {
+            JobVertex sourceJobVertex = new JobVertex("Source");
+            sourceJobVertex.setInvokableClass(BlockingInvokable.class);
+            sourceJobVertex.setParallelism(1);
 
-			flink.waitForActorsToBeAlive();
+            final JobCheckpointingSettings jobCheckpointingSettings =
+                    new JobCheckpointingSettings(
+                            CheckpointCoordinatorConfiguration.builder().build(), null);
 
-			flink.submitJobDetached(jobGraph);
+            final JobGraph jobGraph =
+                    JobGraphBuilder.newStreamingJobGraphBuilder()
+                            .setJobName("TestingJob")
+                            .addJobVertex(sourceJobVertex)
+                            .setJobCheckpointingSettings(jobCheckpointingSettings)
+                            .build();
 
-			Future<Object> jobRunning = flink.getLeaderGateway(deadline.timeLeft())
-				.ask(new TestingJobManagerMessages.WaitForAllVerticesToBeRunning(jobGraph.getJobID()), deadline.timeLeft());
-			Await.ready(jobRunning, deadline.timeLeft());
+            client.submitJob(jobGraph).get();
 
-			MBeanServer mBeanServer = ManagementFactory.getPlatformMBeanServer();
-			Set<ObjectName> nameSet = mBeanServer.queryNames(new ObjectName("org.apache.flink.jobmanager.job.lastCheckpointSize:job_name=TestingJob,*"), null);
-			Assert.assertEquals(1, nameSet.size());
-			assertEquals(-1L, mBeanServer.getAttribute(nameSet.iterator().next(), "Value"));
+            FutureUtils.retrySuccessfulWithDelay(
+                            () -> client.getJobStatus(jobGraph.getJobID()),
+                            Duration.ofMillis(10),
+                            deadline,
+                            status -> status == JobStatus.RUNNING,
+                            new ScheduledExecutorServiceAdapter(EXECUTOR_RESOURCE.getExecutor()))
+                    .get(deadline.timeLeft().toMillis(), TimeUnit.MILLISECONDS);
 
-			Future<Object> jobFinished = flink.getLeaderGateway(deadline.timeLeft())
-				.ask(new TestingJobManagerMessages.NotifyWhenJobRemoved(jobGraph.getJobID()), deadline.timeLeft());
+            MBeanServer mBeanServer = ManagementFactory.getPlatformMBeanServer();
+            Set<ObjectName> nameSet =
+                    mBeanServer.queryNames(
+                            new ObjectName(
+                                    "org.apache.flink.jobmanager.job.lastCheckpointSize:job_name=TestingJob,*"),
+                            null);
+            assertThat(nameSet).hasSize(1);
+            assertThat(mBeanServer.getAttribute(nameSet.iterator().next(), "Value")).isEqualTo(-1L);
 
-			BlockingInvokable.unblock();
+            BlockingInvokable.unblock();
+        } finally {
+            BlockingInvokable.unblock();
+        }
+    }
 
-			// wait til the job has finished
-			Await.ready(jobFinished, deadline.timeLeft());
-		} finally {
-			flink.stop();
-		}
-	}
+    /** Utility to block/unblock a task. */
+    public static class BlockingInvokable extends AbstractInvokable {
 
-	/**
-	 * Utility to block/unblock a task.
-	 */
-	public static class BlockingInvokable extends AbstractInvokable {
-		private static boolean blocking = true;
-		private static final Object lock = new Object();
+        private static final OneShotLatch LATCH = new OneShotLatch();
 
-		@Override
-		public void invoke() throws Exception {
-			while (blocking) {
-				synchronized (lock) {
-					lock.wait();
-				}
-			}
-		}
+        public BlockingInvokable(Environment environment) {
+            super(environment);
+        }
 
-		public static void unblock() {
-			blocking = false;
+        @Override
+        public void invoke() throws Exception {
+            LATCH.await();
+        }
 
-			synchronized (lock) {
-				lock.notifyAll();
-			}
-		}
-	}
+        public static void unblock() {
+            LATCH.trigger();
+        }
+    }
 }

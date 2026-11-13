@@ -18,108 +18,107 @@
 
 package org.apache.flink.streaming.api.operators.async.queue;
 
-import org.apache.flink.runtime.concurrent.Future;
-import org.apache.flink.runtime.concurrent.impl.FlinkFuture;
-import org.apache.flink.streaming.api.operators.async.OperatorActions;
+import org.apache.flink.streaming.api.functions.async.ResultFuture;
 import org.apache.flink.streaming.api.watermark.Watermark;
+import org.apache.flink.streaming.runtime.streamrecord.StreamElement;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
-import org.apache.flink.util.TestLogger;
 
-import org.junit.AfterClass;
-import org.junit.Assert;
-import org.junit.BeforeClass;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.CompletableFuture;
 
-import static org.mockito.Matchers.any;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
+import static org.apache.flink.streaming.api.operators.async.queue.QueueUtil.popCompleted;
+import static org.apache.flink.streaming.api.operators.async.queue.QueueUtil.putSuccessfully;
+import static org.assertj.core.api.Assertions.assertThat;
 
-/**
- * {@link OrderedStreamElementQueue} specific tests.
- */
-public class OrderedStreamElementQueueTest extends TestLogger {
+/** {@link OrderedStreamElementQueue} specific tests. */
+public class OrderedStreamElementQueueTest {
+    /**
+     * Tests that only the head element is pulled from the ordered queue if it has been completed.
+     */
+    @Test
+    void testCompletionOrder() {
+        final OrderedStreamElementQueue<Integer> queue = new OrderedStreamElementQueue<>(4);
 
-	private static final long timeout = 10000L;
-	private static ExecutorService executor;
+        ResultFuture<Integer> entry1 = putSuccessfully(queue, new StreamRecord<>(1, 0L));
+        ResultFuture<Integer> entry2 = putSuccessfully(queue, new StreamRecord<>(2, 1L));
+        putSuccessfully(queue, new Watermark(2L));
+        ResultFuture<Integer> entry4 = putSuccessfully(queue, new StreamRecord<>(3, 3L));
 
-	@BeforeClass
-	public static void setup() {
-		executor = Executors.newFixedThreadPool(3);
-	}
+        assertThat(popCompleted(queue)).isEmpty();
+        assertThat(queue.size()).isEqualTo(4L);
+        assertThat(queue.isEmpty()).isFalse();
 
-	@AfterClass
-	public static void shutdown() {
-		executor.shutdown();
+        entry2.complete(Collections.singleton(11));
+        entry4.complete(Collections.singleton(13));
 
-		try {
-			if (!executor.awaitTermination(timeout, TimeUnit.MILLISECONDS)) {
-				executor.shutdownNow();
-			}
-		} catch (InterruptedException interrupted) {
-			executor.shutdownNow();
+        assertThat(popCompleted(queue)).isEmpty();
+        assertThat(queue.size()).isEqualTo(4L);
+        assertThat(queue.isEmpty()).isFalse();
 
-			Thread.currentThread().interrupt();
-		}
-	}
+        entry1.complete(Collections.singleton(10));
 
-	/**
-	 * Tests that only the head element is pulled from the ordered queue if it has been
-	 * completed.
-	 */
-	@Test
-	public void testCompletionOrder() throws Exception {
-		OperatorActions operatorActions = mock(OperatorActions.class);
-		final OrderedStreamElementQueue queue = new OrderedStreamElementQueue(4, executor, operatorActions);
+        List<StreamElement> expected =
+                Arrays.asList(
+                        new StreamRecord<>(10, 0L),
+                        new StreamRecord<>(11, 1L),
+                        new Watermark(2L),
+                        new StreamRecord<>(13, 3L));
+        assertThat(popCompleted(queue)).isEqualTo(expected);
+        assertThat(queue.size()).isZero();
+        assertThat(queue.isEmpty()).isTrue();
+    }
 
-		StreamRecordQueueEntry<Integer> entry1 = new StreamRecordQueueEntry<>(new StreamRecord<>(1, 0L));
-		StreamRecordQueueEntry<Integer> entry2 = new StreamRecordQueueEntry<>(new StreamRecord<>(2, 1L));
-		WatermarkQueueEntry entry3 = new WatermarkQueueEntry(new Watermark(2L));
-		StreamRecordQueueEntry<Integer> entry4 = new StreamRecordQueueEntry<>(new StreamRecord<>(3, 3L));
+    /**
+     * Tests that {@link OrderedStreamElementQueue#isAvailable()} flips to false once the queue is
+     * full and that {@link OrderedStreamElementQueue#getAvailableFuture()} returns an incomplete
+     * future in that state.
+     */
+    @Test
+    void testIsAvailableTogglesWithCapacity() {
+        final OrderedStreamElementQueue<Integer> queue = new OrderedStreamElementQueue<>(2);
 
-		List<StreamElementQueueEntry<?>> expected = Arrays.asList(entry1, entry2, entry3, entry4);
+        assertThat(queue.isAvailable()).isTrue();
+        assertThat(queue.getAvailableFuture().isDone()).isTrue();
 
-		for (StreamElementQueueEntry<?> entry : expected) {
-			queue.put(entry);
-		}
+        putSuccessfully(queue, new StreamRecord<>(1, 0L));
+        assertThat(queue.isAvailable())
+                .as("queue with one free slot remaining should still be available")
+                .isTrue();
 
-		Future<List<AsyncResult>> pollOperation = FlinkFuture.supplyAsync(new Callable<List<AsyncResult>>() {
-			@Override
-			public List<AsyncResult> call() throws Exception {
-				List<AsyncResult> result = new ArrayList<>(4);
-				while (!queue.isEmpty()) {
-					result.add(queue.poll());
-				}
+        putSuccessfully(queue, new StreamRecord<>(2, 1L));
+        assertThat(queue.isAvailable()).as("queue at capacity should be unavailable").isFalse();
+        assertThat(queue.getAvailableFuture().isDone()).isFalse();
+    }
 
-				return result;
-			}
-		}, executor);
+    /**
+     * Tests that the future returned by {@link OrderedStreamElementQueue#getAvailableFuture()}
+     * completes once a slot is freed by emitting a completed head element, and that the queue
+     * becomes available again.
+     */
+    @Test
+    void testGetAvailableFutureCompletesWhenSlotFreed() {
+        final OrderedStreamElementQueue<Integer> queue = new OrderedStreamElementQueue<>(2);
 
-		Thread.sleep(10L);
+        ResultFuture<Integer> entry1 = putSuccessfully(queue, new StreamRecord<>(1, 0L));
+        putSuccessfully(queue, new StreamRecord<>(2, 1L));
 
-		Assert.assertFalse(pollOperation.isDone());
+        CompletableFuture<?> availableFuture = queue.getAvailableFuture();
+        assertThat(availableFuture.isDone()).isFalse();
+        assertThat(queue.isAvailable()).isFalse();
 
-		entry2.collect(Collections.<Integer>emptyList());
+        // Completing the head and emitting it frees one slot, which must complete the future
+        // captured while the queue was full.
+        entry1.complete(Collections.singleton(10));
+        assertThat(popCompleted(queue)).containsExactly(new StreamRecord<>(10, 0L));
 
-		entry4.collect(Collections.<Integer>emptyList());
-
-		Thread.sleep(10L);
-
-		Assert.assertEquals(4, queue.size());
-
-		entry1.collect(Collections.<Integer>emptyList());
-
-		Assert.assertEquals(expected, pollOperation.get());
-
-		verify(operatorActions, never()).failOperator(any(Exception.class));
-	}
+        assertThat(availableFuture.isDone())
+                .as("availability future should be completed when capacity is freed")
+                .isTrue();
+        assertThat(queue.isAvailable()).isTrue();
+        assertThat(queue.getAvailableFuture().isDone()).isTrue();
+    }
 }

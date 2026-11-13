@@ -1,0 +1,1252 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.flink.table.planner.plan.stream.sql.join
+
+import org.apache.flink.table.api._
+import org.apache.flink.table.api.config.{ExecutionConfigOptions, OptimizerConfigOptions}
+import org.apache.flink.table.planner.utils.{StreamTableTestUtil, TableFunc1, TableTestBase}
+import org.apache.flink.table.planner.utils.ImmutableColConstraintTestUtils.addImmutableColConstraint
+
+import org.assertj.core.api.Assertions.assertThatThrownBy
+import org.junit.jupiter.api.Test
+
+import java.time.Duration
+
+class JoinTest extends TableTestBase {
+
+  private val util: StreamTableTestUtil = streamTestUtil()
+  util.addTableSource[(Int, Long, Long)]("A", 'a1, 'a2, 'a3)
+  util.addTableSource[(Int, Long, Long)]("B", 'b1, 'b2, 'b3)
+  util.addTableSource[(Int, Long, String)]("t", 'a, 'b, 'c)
+  util.addTableSource[(Long, String, Int)]("s", 'x, 'y, 'z)
+
+  @Test
+  def testDependentConditionDerivationInnerJoin(): Unit = {
+    util.verifyExecPlan("SELECT a1, b1 FROM A JOIN B ON (a1 = 1 AND b1 = 1) OR (a2 = 2 AND b2 = 2)")
+  }
+
+  @Test
+  def testDependentConditionDerivationInnerJoinWithTrue(): Unit = {
+    util.verifyExecPlan("SELECT a1, b1 FROM A JOIN B ON (a1 = 1 AND b1 = 1) OR (a2 = 2 AND true)")
+  }
+
+  @Test
+  def testDependentConditionDerivationInnerJoinWithNull(): Unit = {
+    util.verifyExecPlan("SELECT * FROM t JOIN s ON (a = 1 AND x = 1) OR (a = 2 AND y is null)")
+  }
+
+  @Test
+  def testInnerJoin(): Unit = {
+    util.verifyExecPlan("SELECT a1, b1 FROM A JOIN B ON a1 = b1")
+  }
+
+  @Test
+  def testInnerJoinWithEqualPk(): Unit = {
+    val query1 = "SELECT SUM(a2) AS a2, a1 FROM A GROUP BY a1"
+    val query2 = "SELECT SUM(b2) AS b2, b1 FROM B GROUP BY b1"
+    val query = s"SELECT a1, b1 FROM ($query1) JOIN ($query2) ON a1 = b1"
+    util.verifyRelPlan(query, ExplainDetail.CHANGELOG_MODE)
+  }
+
+  @Test
+  def testInnerJoinWithPk(): Unit = {
+    val query1 = "SELECT SUM(a2) AS a2, a1 FROM A GROUP BY a1"
+    val query2 = "SELECT SUM(b2) AS b2, b1 FROM B GROUP BY b1"
+    val query = s"SELECT a1, a2, b1, b2 FROM ($query1) JOIN ($query2) ON a2 = b2"
+    util.verifyRelPlan(query, ExplainDetail.CHANGELOG_MODE)
+  }
+
+  @Test
+  def testLeftJoinNonEqui(): Unit = {
+    util.verifyRelPlan(
+      "SELECT a1, b1 FROM A LEFT JOIN B ON a1 = b1 AND a2 > b2",
+      ExplainDetail.CHANGELOG_MODE)
+  }
+
+  @Test
+  def testLeftJoinWithEqualPkNonEqui(): Unit = {
+    val query1 = "SELECT SUM(a2) AS a2, a1 FROM A GROUP BY a1"
+    val query2 = "SELECT SUM(b2) AS b2, b1 FROM B GROUP BY b1"
+    val query = s"SELECT a1, b1 FROM ($query1) LEFT JOIN ($query2) ON a1 = b1 AND a2 > b2"
+    util.verifyRelPlan(query, ExplainDetail.CHANGELOG_MODE)
+  }
+
+  @Test
+  def testLeftJoinWithRightNotPkNonEqui(): Unit = {
+    val query1 = "SELECT SUM(a2) AS a2, a1 FROM A GROUP BY a1"
+    val query = s"SELECT a1, b1 FROM ($query1) LEFT JOIN B ON a1 = b1 AND a2 > b2"
+    util.verifyRelPlan(query, ExplainDetail.CHANGELOG_MODE)
+  }
+
+  @Test
+  def testLeftJoinWithPkNonEqui(): Unit = {
+    val query1 = "SELECT SUM(a2) AS a2, a1 FROM A GROUP BY a1"
+    val query2 = "SELECT SUM(b2) AS b2, b1 FROM B GROUP BY b1"
+    val query = s"SELECT a1, a2, b1, b2 FROM ($query1) LEFT JOIN ($query2) ON a2 = b2 AND a1 > b1"
+    util.verifyRelPlan(query, ExplainDetail.CHANGELOG_MODE)
+  }
+
+  @Test
+  def testLeftJoin(): Unit = {
+    util.verifyRelPlan("SELECT a1, b1 FROM A LEFT JOIN B ON a1 = b1", ExplainDetail.CHANGELOG_MODE)
+  }
+
+  @Test
+  def testLeftJoinWithEqualPk(): Unit = {
+    val query1 = "SELECT SUM(a2) AS a2, a1 FROM A GROUP BY a1"
+    val query2 = "SELECT SUM(b2) AS b2, b1 FROM B GROUP BY b1"
+    val query = s"SELECT a1, b1 FROM ($query1) LEFT JOIN ($query2) ON a1 = b1"
+    util.verifyRelPlan(query, ExplainDetail.CHANGELOG_MODE)
+  }
+
+  @Test
+  def testLeftJoinWithRightNotPk(): Unit = {
+    val query1 = "SELECT SUM(a2) AS a2, a1 FROM A GROUP BY a1"
+    val query = s"SELECT a1, b1 FROM ($query1) LEFT JOIN B ON a1 = b1"
+    util.verifyRelPlan(query, ExplainDetail.CHANGELOG_MODE)
+  }
+
+  @Test
+  def testLeftJoinWithPk(): Unit = {
+    val query1 = "SELECT SUM(a2) AS a2, a1 FROM A GROUP BY a1"
+    val query2 = "SELECT SUM(b2) AS b2, b1 FROM B GROUP BY b1"
+    val query = s"SELECT a1, a2, b1, b2 FROM ($query1) LEFT JOIN ($query2) ON a2 = b2"
+    util.verifyRelPlan(query, ExplainDetail.CHANGELOG_MODE)
+  }
+
+  @Test
+  def testRightJoinNonEqui(): Unit = {
+    util.verifyRelPlan(
+      "SELECT a1, b1 FROM A RIGHT JOIN B ON a1 = b1 AND a2 > b2",
+      ExplainDetail.CHANGELOG_MODE)
+  }
+
+  @Test
+  def testRightJoinWithEqualPkNonEqui(): Unit = {
+    val query1 = "SELECT SUM(a2) AS a2, a1 FROM A GROUP BY a1"
+    val query2 = "SELECT SUM(b2) AS b2, b1 FROM B GROUP BY b1"
+    val query = s"SELECT a1, b1 FROM ($query1) RIGHT JOIN ($query2) ON a1 = b1 AND a2 > b2"
+    util.verifyRelPlan(query, ExplainDetail.CHANGELOG_MODE)
+  }
+
+  @Test
+  def testRightJoinWithRightNotPkNonEqui(): Unit = {
+    val query1 = "SELECT SUM(a2) AS a2, a1 FROM A GROUP BY a1"
+    val query = s"SELECT a1, b1 FROM ($query1) RIGHT JOIN B ON a1 = b1 AND a2 > b2"
+    util.verifyRelPlan(query, ExplainDetail.CHANGELOG_MODE)
+  }
+
+  @Test
+  def testRightJoinWithPkNonEqui(): Unit = {
+    val query1 = "SELECT SUM(a2) AS a2, a1 FROM A GROUP BY a1"
+    val query2 = "SELECT SUM(b2) AS b2, b1 FROM B GROUP BY b1"
+    val query = s"SELECT a1, a2, b1, b2 FROM ($query1) RIGHT JOIN ($query2) ON a2 = b2 AND a1 > b1"
+    util.verifyRelPlan(query, ExplainDetail.CHANGELOG_MODE)
+  }
+
+  @Test
+  def testRightJoin(): Unit = {
+    util.verifyRelPlan("SELECT a1, b1 FROM A RIGHT JOIN B ON a1 = b1", ExplainDetail.CHANGELOG_MODE)
+  }
+
+  @Test
+  def testRightJoinWithEqualPk(): Unit = {
+    val query1 = "SELECT SUM(a2) AS a2, a1 FROM A GROUP BY a1"
+    val query2 = "SELECT SUM(b2) AS b2, b1 FROM B GROUP BY b1"
+    val query = s"SELECT a1, b1 FROM ($query1) RIGHT JOIN ($query2) ON a1 = b1"
+    util.verifyRelPlan(query, ExplainDetail.CHANGELOG_MODE)
+  }
+
+  @Test
+  def testRightJoinWithRightNotPk(): Unit = {
+    val query1 = "SELECT SUM(a2) AS a2, a1 FROM A group by a1"
+    val query = s"SELECT a1, b1 FROM ($query1) RIGHT JOIN B ON a1 = b1"
+    util.verifyRelPlan(query, ExplainDetail.CHANGELOG_MODE)
+  }
+
+  @Test
+  def testRightJoinWithPk(): Unit = {
+    val query1 = "SELECT SUM(a2) AS a2, a1 FROM A group by a1"
+    val query2 = "SELECT SUM(b2) AS b2, b1 FROM B group by b1"
+    val query = s"SELECT a1, a2, b1, b2 FROM ($query1) RIGHT JOIN ($query2) ON a2 = b2"
+    util.verifyRelPlan(query, ExplainDetail.CHANGELOG_MODE)
+  }
+
+  @Test
+  def testFullJoinNonEqui(): Unit = {
+    util.verifyRelPlan(
+      "SELECT a1, b1 FROM A FULL JOIN B ON a1 = b1 AND a2 > b2",
+      ExplainDetail.CHANGELOG_MODE)
+  }
+
+  @Test
+  def testFullJoinWithEqualPkNonEqui(): Unit = {
+    val query1 = "SELECT SUM(a2) AS a2, a1 FROM A GROUP BY a1"
+    val query2 = "SELECT SUM(b2) AS b2, b1 FROM B GROUP BY b1"
+    val query = s"SELECT a1, b1 FROM ($query1) FULL JOIN ($query2) ON a1 = b1 AND a2 > b2"
+    util.verifyRelPlan(query, ExplainDetail.CHANGELOG_MODE)
+  }
+
+  @Test
+  def testFullJoinWithFullNotPkNonEqui(): Unit = {
+    val query1 = "SELECT SUM(a2) AS a2, a1 FROM A GROUP BY a1"
+    val query = s"SELECT a1, b1 FROM ($query1) FULL JOIN B ON a1 = b1 AND a2 > b2"
+    util.verifyRelPlan(query, ExplainDetail.CHANGELOG_MODE)
+  }
+
+  @Test
+  def testFullJoinWithPkNonEqui(): Unit = {
+    val query1 = "SELECT SUM(a2) AS a2, a1 FROM A GROUP BY a1"
+    val query2 = "SELECT SUM(b2) AS b2, b1 FROM B GROUP BY b1"
+    val query = s"SELECT a1, a2, b1, b2 FROM ($query1) FULL JOIN ($query2) ON a2 = b2 AND a1 > b1"
+    util.verifyRelPlan(query, ExplainDetail.CHANGELOG_MODE)
+  }
+
+  @Test
+  def testFullJoin(): Unit = {
+    val query = "SELECT a1, b1 FROM A FULL JOIN B ON a1 = b1"
+    util.verifyRelPlan(query, ExplainDetail.CHANGELOG_MODE)
+  }
+
+  @Test
+  def testFullJoinWithEqualPk(): Unit = {
+    val query1 = "SELECT SUM(a2) AS a2, a1 FROM A GROUP BY a1"
+    val query2 = "SELECT SUM(b2) AS b2, b1 FROM B GROUP BY b1"
+    val query = s"SELECT a1, b1 FROM ($query1) FULL JOIN ($query2) ON a1 = b1"
+    util.verifyRelPlan(query, ExplainDetail.CHANGELOG_MODE)
+  }
+
+  @Test
+  def testFullJoinWithFullNotPk(): Unit = {
+    val query1 = "SELECT SUM(a2) AS a2, a1 FROM A GROUP BY a1"
+    val query = s"SELECT a1, b1 FROM ($query1) FULL JOIN B ON a1 = b1"
+    util.verifyRelPlan(query, ExplainDetail.CHANGELOG_MODE)
+  }
+
+  @Test
+  def testFullJoinWithPk(): Unit = {
+    val query1 = "SELECT SUM(a2) AS a2, a1 FROM A GROUP BY a1"
+    val query2 = "SELECT SUM(b2) AS b2, b1 FROM B GROUP BY b1"
+    val query = s"SELECT a1, a2, b1, b2 FROM ($query1) FULL JOIN ($query2) ON a2 = b2"
+    util.verifyRelPlan(query, ExplainDetail.CHANGELOG_MODE)
+  }
+
+  @Test
+  def testSelfJoinPlan(): Unit = {
+    util.addTableSource[(Long, String)]("src", 'key, 'v)
+    val sql =
+      s"""
+         |SELECT * FROM (
+         |  SELECT * FROM src WHERE key = 0) src1
+         |LEFT OUTER JOIN (
+         |  SELECT * FROM src WHERE key = 0) src2
+         |ON (src1.key = src2.key AND src2.key > 10)
+       """.stripMargin
+    util.verifyRelPlan(sql, ExplainDetail.CHANGELOG_MODE)
+  }
+
+  @Test
+  def testJoinWithSort(): Unit = {
+    util.addTableSource[(Int, Int, String)]("MyTable3", 'i, 'j, 't)
+    util.addTableSource[(Int, Int)]("MyTable4", 'i, 'k)
+
+    val sqlQuery =
+      """
+        |SELECT * FROM
+        |  MyTable3 FULL JOIN
+        |  (SELECT * FROM MyTable4 ORDER BY MyTable4.i DESC, MyTable4.k ASC) MyTable4
+        |  ON MyTable3.i = MyTable4.i and MyTable3.i = MyTable4.k
+      """.stripMargin
+
+    util.verifyExecPlan(sqlQuery)
+  }
+
+  @Test
+  def testLeftOuterJoinEquiPred(): Unit = {
+    util.verifyExecPlan("SELECT b, y FROM t LEFT OUTER JOIN s ON a = z")
+  }
+
+  @Test
+  def testLeftOuterJoinEquiAndLocalPred(): Unit = {
+    util.verifyExecPlan("SELECT b, y FROM t LEFT OUTER JOIN s ON a = z AND b < 2")
+  }
+
+  @Test
+  def testLeftOuterJoinEquiAndNonEquiPred(): Unit = {
+    util.verifyExecPlan("SELECT b, y FROM t LEFT OUTER JOIN s ON a = z AND b < x")
+  }
+
+  @Test
+  def testRightOuterJoinEquiPred(): Unit = {
+    util.verifyExecPlan("SELECT b, y FROM t RIGHT OUTER JOIN s ON a = z")
+  }
+
+  @Test
+  def testRightOuterJoinEquiAndLocalPred(): Unit = {
+    util.verifyExecPlan("SELECT b, x FROM t RIGHT OUTER JOIN s ON a = z AND x < 2")
+  }
+
+  @Test
+  def testRightOuterJoinEquiAndNonEquiPred(): Unit = {
+    util.verifyExecPlan("SELECT b, y FROM t RIGHT OUTER JOIN s ON a = z AND b < x")
+  }
+
+  @Test
+  def testJoinAndSelectOnPartialCompositePrimaryKey(): Unit = {
+    util.tableEnv.executeSql("""
+                               |CREATE TABLE tableWithCompositePk (
+                               |  pk1 INT,
+                               |  pk2 BIGINT,
+                               |  PRIMARY KEY (pk1, pk2) NOT ENFORCED
+                               |) WITH (
+                               |  'connector'='values'
+                               |)
+                               |""".stripMargin)
+    util.verifyExecPlan("SELECT A.a1 FROM A LEFT JOIN tableWithCompositePk T ON A.a1 = T.pk1")
+  }
+
+  @Test
+  def testJoinDisorderChangeLog(): Unit = {
+    util.tableEnv.executeSql("""
+                               |CREATE TABLE src (person String, votes BIGINT) WITH(
+                               |  'connector' = 'values'
+                               |)
+                               |""".stripMargin)
+
+    util.tableEnv.executeSql(
+      """
+        |CREATE TABLE award (votes BIGINT, prize DOUBLE, PRIMARY KEY(votes) NOT ENFORCED) WITH(
+        |  'connector' = 'values'
+        |)
+        |""".stripMargin)
+
+    util.tableEnv.executeSql(
+      """
+        |CREATE TABLE people (person STRING, age INT, PRIMARY KEY(person) NOT ENFORCED) WITH(
+        |  'connector' = 'values'
+        |)
+        |""".stripMargin)
+
+    util.verifyExecPlan("""
+                          |SELECT T1.person, T1.sum_votes, T1.prize, T2.age FROM
+                          | (SELECT T.person, T.sum_votes, award.prize FROM
+                          |   (SELECT person, SUM(votes) AS sum_votes FROM src GROUP BY person) T,
+                          |   award
+                          |   WHERE T.sum_votes = award.votes) T1, people T2
+                          | WHERE T1.person = T2.person
+                          |""".stripMargin)
+  }
+
+  @Test
+  def testJoinOutputUpsertKeyNotMatchSinkPk(): Unit = {
+    // test for FLINK-20370
+    util.tableEnv.executeSql("""
+                               |create table source_city (
+                               | id varchar,
+                               | city_name varchar,
+                               | primary key (id) not enforced
+                               |) with (
+                               | 'connector' = 'values',
+                               | 'changelog-mode' = 'I,UA,D'
+                               |)
+                               |""".stripMargin)
+
+    util.tableEnv.executeSql("""
+                               |create table source_customer (
+                               | customer_id varchar,
+                               | city_id varchar,
+                               | age int,
+                               | gender varchar,
+                               | update_time timestamp(3),
+                               | primary key (customer_id) not enforced
+                               |) with (
+                               | 'connector' = 'values',
+                               | 'changelog-mode' = 'I,UA,D'
+                               |)
+                               |""".stripMargin)
+
+    util.tableEnv.executeSql("""
+                               |create table sink (
+                               | city_id varchar,
+                               | city_name varchar,
+                               | customer_cnt bigint,
+                               | primary key (city_name) not enforced
+                               |) with (
+                               | 'connector' = 'values'
+                               | ,'sink-insert-only' = 'false'
+                               |)
+                               |""".stripMargin)
+
+    // verify UB should reserve and add upsertMaterialize if join outputs' upsert keys differs from
+    // sink's pks
+    util.verifyExplainInsert(
+      """
+        |insert into sink
+        |select t1.city_id, t2.city_name, t1.customer_cnt
+        | from (select city_id, count(*) customer_cnt from source_customer group by city_id) t1
+        | join source_city t2 on t1.city_id = t2.id
+        |on conflict do deduplicate
+        |""".stripMargin,
+      ExplainDetail.CHANGELOG_MODE
+    )
+  }
+
+  @Test
+  def testJoinOutputUpsertKeyInSinkPk(): Unit = {
+    // test for FLINK-20370
+    util.tableEnv.executeSql("""
+                               |create table source_city (
+                               | id varchar,
+                               | city_name varchar,
+                               | primary key (id) not enforced
+                               |) with (
+                               | 'connector' = 'values',
+                               | 'changelog-mode' = 'I,UA,D'
+                               |)
+                               |""".stripMargin)
+
+    util.tableEnv.executeSql("""
+                               |create table source_customer (
+                               | customer_id varchar,
+                               | city_id varchar,
+                               | age int,
+                               | gender varchar,
+                               | update_time timestamp(3),
+                               | primary key (customer_id) not enforced
+                               |) with (
+                               | 'connector' = 'values',
+                               | 'changelog-mode' = 'I,UA,D'
+                               |)
+                               |""".stripMargin)
+
+    util.tableEnv.executeSql("""
+                               |create table sink (
+                               | city_id varchar,
+                               | city_name varchar,
+                               | customer_cnt bigint,
+                               | primary key (city_id, city_name) not enforced
+                               |) with (
+                               | 'connector' = 'values'
+                               | ,'sink-insert-only' = 'false'
+                               |)
+                               |""".stripMargin)
+
+    // verify UB should reserve and no upsertMaterialize if join outputs' upsert keys are subset of
+    // sink's pks
+    util.verifyExplainInsert(
+      """
+        |insert into sink
+        |select t1.city_id, t2.city_name, t1.customer_cnt
+        | from (select city_id, count(*) customer_cnt from source_customer group by city_id) t1
+        | join source_city t2 on t1.city_id = t2.id
+        |""".stripMargin,
+      ExplainDetail.CHANGELOG_MODE
+    )
+  }
+
+  @Test
+  def testJoinOutputLostUpsertKeyWithSinkPk(): Unit = {
+    // test for FLINK-20370
+    util.tableEnv.executeSql("""
+                               |create table source_city (
+                               | id varchar,
+                               | city_name varchar,
+                               | primary key (id) not enforced
+                               |) with (
+                               | 'connector' = 'values',
+                               | 'changelog-mode' = 'I,UA,D'
+                               |)
+                               |""".stripMargin)
+
+    util.tableEnv.executeSql("""
+                               |create table source_customer (
+                               | customer_id varchar,
+                               | city_id varchar,
+                               | age int,
+                               | gender varchar,
+                               | update_time timestamp(3),
+                               | primary key (customer_id) not enforced
+                               |) with (
+                               | 'connector' = 'values',
+                               | 'changelog-mode' = 'I,UA,D'
+                               |)
+                               |""".stripMargin)
+
+    util.tableEnv.executeSql("""
+                               |create table sink (
+                               | city_name varchar,
+                               | customer_cnt bigint,
+                               | primary key (city_name) not enforced
+                               |) with (
+                               | 'connector' = 'values'
+                               | ,'sink-insert-only' = 'false'
+                               |)
+                               |""".stripMargin)
+
+    // verify UB should reserve and add upsertMaterialize if join outputs' lost upsert keys
+    util.verifyExplainInsert(
+      """
+        |insert into sink
+        |select t2.city_name, t1.customer_cnt
+        | from (select city_id, count(*) customer_cnt from source_customer group by city_id) t1
+        | join source_city t2 on t1.city_id = t2.id
+        | on conflict do deduplicate
+        |""".stripMargin,
+      ExplainDetail.CHANGELOG_MODE
+    )
+  }
+
+  @Test
+  def testJoinOutputUpsertKeyInSinkPkWhileJoinOnImmutableCols(): Unit = {
+    val catalog = util.tableEnv.getCatalog(util.tableEnv.getCurrentCatalog).get()
+
+    util.tableEnv.executeSql("""
+                               |create table source_city (
+                               | id varchar,
+                               | city_name varchar,
+                               | primary key (id) not enforced
+                               |) with (
+                               | 'connector' = 'values',
+                               | 'changelog-mode' = 'I,UA,UB'
+                               |)
+                               |""".stripMargin)
+    addImmutableColConstraint(catalog, util.tableEnv.getCurrentDatabase, "source_city", "city_name")
+
+    util.tableEnv.executeSql("""
+                               |create table source_city_detail (
+                               | city_id varchar,
+                               | city_name varchar,
+                               | city_detail varchar,
+                               | primary key (city_id) not enforced
+                               |) with (
+                               | 'connector' = 'values',
+                               | 'changelog-mode' = 'I,UA,UB'
+                               |)
+                               |""".stripMargin)
+    addImmutableColConstraint(
+      catalog,
+      util.tableEnv.getCurrentDatabase,
+      "source_city_detail",
+      "city_name")
+
+    util.tableEnv.executeSql("""
+                               |create table sink (
+                               | id varchar,
+                               | city_id varchar,
+                               | city_name varchar,
+                               | city_detail varchar,
+                               | primary key (id, city_id) not enforced
+                               |) with (
+                               | 'connector' = 'values'
+                               | ,'sink-insert-only' = 'false'
+                               |)
+                               |""".stripMargin)
+
+    // verify UB should be dropped and no upsertMaterialize
+    util.verifyExplainInsert(
+      """
+        |insert into sink
+        |select t1.id, t2.city_id, t1.city_name, t2.city_detail
+        | from source_city t1
+        | join source_city_detail t2 on t1.city_name = t2.city_name
+        |on conflict do deduplicate
+        |""".stripMargin,
+      ExplainDetail.CHANGELOG_MODE
+    )
+  }
+
+  @Test
+  def testJoinOutputUpsertKeyInSinkPkWhileJoinOnPartOfImmutableCols(): Unit = {
+    val catalog = util.tableEnv.getCatalog(util.tableEnv.getCurrentCatalog).get()
+
+    util.tableEnv.executeSql("""
+                               |create table source_city (
+                               | id varchar,
+                               | city_name varchar,
+                               | city_no int,
+                               | primary key (id) not enforced
+                               |) with (
+                               | 'connector' = 'values',
+                               | 'changelog-mode' = 'I,UA,UB'
+                               |)
+                               |""".stripMargin)
+    addImmutableColConstraint(
+      catalog,
+      util.tableEnv.getCurrentDatabase,
+      "source_city",
+      "city_name",
+      "city_no")
+
+    util.tableEnv.executeSql("""
+                               |create table source_city_detail (
+                               | city_id varchar,
+                               | city_name varchar,
+                               | city_no int,
+                               | city_detail varchar,
+                               | primary key (city_id) not enforced
+                               |) with (
+                               | 'connector' = 'values',
+                               | 'changelog-mode' = 'I,UA,UB'
+                               |)
+                               |""".stripMargin)
+    addImmutableColConstraint(
+      catalog,
+      util.tableEnv.getCurrentDatabase,
+      "source_city_detail",
+      "city_name",
+      "city_no")
+
+    util.tableEnv.executeSql("""
+                               |create table sink (
+                               | id varchar,
+                               | city_id varchar,
+                               | city_name varchar,
+                               | city_detail varchar,
+                               | primary key (id, city_id) not enforced
+                               |) with (
+                               | 'connector' = 'values'
+                               | ,'sink-insert-only' = 'false'
+                               |)
+                               |""".stripMargin)
+
+    // verify UB should be dropped and no upsertMaterialize on sink
+    util.verifyExplainInsert(
+      """
+        |insert into sink
+        |select t1.id, t2.city_id, t1.city_name, t2.city_detail
+        | from source_city t1
+        | join source_city_detail t2 on t1.city_name = t2.city_name
+        |on conflict do deduplicate
+        |""".stripMargin,
+      ExplainDetail.CHANGELOG_MODE
+    )
+  }
+
+  @Test
+  def testInnerJoinWithFilterPushDown(): Unit = {
+    util.verifyExecPlan("""
+                          |SELECT * FROM
+                          |   (select a1, count(a2) as a2 from A group by a1)
+                          |   join
+                          |   (select b1, count(b2) as b2 from B group by b1)
+                          |   on true where a1 = b1 and a2 = b2 and b1 = 2
+                          |""".stripMargin)
+  }
+
+  @Test
+  def testInnerJoinWithJoinConditionPushDown(): Unit = {
+    util.verifyExecPlan("""
+                          |SELECT * FROM
+                          |  (select a1, count(a2) as a2 from A group by a1)
+                          |   join
+                          |  (select b1, count(b2) as b2 from B group by b1)
+                          |   on true where a1 = b1 and a2 = b2 and b1 = 2 and a2 = 1
+                          |""".stripMargin)
+  }
+
+  @Test
+  def testLeftJoinWithFilterPushDown(): Unit = {
+    util.verifyExecPlan("""
+                          |SELECT * FROM
+                          |  (select a1, count(a2) as a2 from A group by a1)
+                          |   left join
+                          |  (select b1, count(b2) as b2 from B group by b1)
+                          |   on true where a1 = b1 and b2 = a2 and a1 = 2
+                          |""".stripMargin)
+  }
+
+  @Test
+  def testLeftJoinWithJoinConditionPushDown(): Unit = {
+    util.verifyExecPlan("""
+                          |SELECT * FROM
+                          |  (select a1, count(a2) as a2 from A group by a1)
+                          |   left join
+                          |  (select b1, count(b2) as b2 from B group by b1)
+                          |   on a1 = b1 and a2 = b2 and a1 = 2 and b2 = 1
+                          |""".stripMargin)
+  }
+
+  @Test
+  def testRightJoinWithFilterPushDown(): Unit = {
+    util.verifyExecPlan("""
+                          |SELECT * FROM
+                          |  (select a1, count(a2) as a2 from A group by a1)
+                          |   right join
+                          |  (select b1, count(b2) as b2 from B group by b1)
+                          |   on true where a1 = b1 and a2 = b2 and b1 = 2
+                          |""".stripMargin)
+  }
+
+  @Test
+  def testRightJoinWithJoinConditionPushDown(): Unit = {
+    util.verifyExecPlan("""
+                          |SELECT * FROM
+                          | (select a1, count(a2) as a2 from A group by a1)
+                          |   right join
+                          | (select b1, count(b2) as b2 from B group by b1)
+                          |   on a1 = b1 and a2 = b2 and b1 = 2 and a2 = 1
+                          |""".stripMargin)
+  }
+
+  @Test
+  def testJoinUDTFWithInvalidJoinHint(): Unit = {
+    // TODO the error message should be improved after we support extracting alias from table func
+    util.addTemporarySystemFunction("TableFunc1", new TableFunc1)
+    util.verifyExpectdException(
+      "SELECT /*+ LOOKUP('table'='DD') */ T.a FROM t AS T CROSS JOIN LATERAL TABLE(TableFunc1(c)) AS D(c1)",
+      "The options of following hints cannot match the name of input tables or views: \n" +
+        "`DD` in `LOOKUP`"
+    )
+  }
+
+  @Test
+  def testJoinPartitionTableWithNonExistentPartition(): Unit = {
+    util.tableEnv.executeSql("""
+                               |create table leftPartitionTable (
+                               | a1 varchar,
+                               | b1 int)
+                               | partitioned by (b1) 
+                               | with (
+                               | 'connector' = 'values',
+                               | 'bounded' = 'false',
+                               | 'partition-list' = 'b1:1'
+                               |)
+                               |""".stripMargin)
+    util.tableEnv.executeSql("""
+                               |create table rightPartitionTable (
+                               | a2 varchar,
+                               | b2 int)
+                               | partitioned by (b2) 
+                               | with (
+                               | 'connector' = 'values',
+                               | 'bounded' = 'false',
+                               | 'partition-list' = 'b2:2'
+                               |)
+                               |""".stripMargin)
+    // partition 'b2 = 3' not exists.
+    util.verifyExecPlan(
+      """
+        |SELECT * FROM leftPartitionTable, rightPartitionTable WHERE b1 = 1 AND b2 = 3 AND a1 = a2
+        |""".stripMargin)
+  }
+
+  @Test
+  def testJoinAccessSourcePkWithMiniBatchAssigner(): Unit = {
+    util.tableEnv.executeSql("""
+                               |create table left_table (
+                               | a varchar primary key not enforced,
+                               | b int
+                               |) with (
+                               | 'connector' = 'values'
+                               |)
+                               |""".stripMargin)
+
+    util.tableEnv.executeSql("""
+                               |create table right_table (
+                               | c varchar primary key not enforced,
+                               | d int
+                               |) with (
+                               | 'connector' = 'values'
+                               |)
+                               |""".stripMargin)
+
+    util.tableEnv.executeSql("""
+                               |create table sink (
+                               | e varchar primary key not enforced,
+                               | f int,
+                               | g int
+                               |) with (
+                               | 'connector' = 'values'
+                               |)
+                               |""".stripMargin)
+
+    util.tableEnv.getConfig.getConfiguration
+      .set(ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ENABLED, Boolean.box(true))
+    util.tableEnv.getConfig.getConfiguration
+      .set(ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ALLOW_LATENCY, Duration.ofSeconds(10))
+    util.tableEnv.getConfig.getConfiguration
+      .set(ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_SIZE, Long.box(5000L))
+
+    util.verifyExplainInsert(
+      """
+        |insert into sink
+        |select left_table.a, left_table.b, right_table.d
+        | from left_table
+        | join right_table on left_table.a = right_table.c
+        |""".stripMargin
+    )
+  }
+
+  @Test
+  def testMiniBatchJoinWithNegativeMiniBatchSize(): Unit = {
+    util.tableEnv.getConfig.getConfiguration
+      .set(ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ENABLED, Boolean.box(true))
+    util.tableEnv.getConfig.getConfiguration
+      .set(ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ALLOW_LATENCY, Duration.ofSeconds(10))
+
+    val sql = "SELECT * FROM A JOIN B ON a1 = b1"
+
+    // without setting mini-batch size
+    assertThatThrownBy(() => util.verifyExplain(sql))
+      .hasMessage(
+        "Key: 'table.exec.mini-batch.size' , default: -1 (fallback keys: []) must be > 0.")
+      .isInstanceOf[IllegalArgumentException]
+
+    // set negative mini-batch size
+    util.tableEnv.getConfig.getConfiguration
+      .set(ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_SIZE, Long.box(-500L))
+    assertThatThrownBy(() => util.verifyExplain(sql))
+      .hasMessage(
+        "Key: 'table.exec.mini-batch.size' , default: -1 (fallback keys: []) must be > 0.")
+      .isInstanceOf[IllegalArgumentException]
+  }
+
+  private def createUpsertSource(
+      name: String,
+      columns: String,
+      primaryKey: String,
+      deleteByKey: Boolean = false): Unit =
+    util.tableEnv.executeSql(s"""
+                                |create table $name (
+                                | $columns,
+                                | primary key ($primaryKey) not enforced
+                                |) with (
+                                | 'connector' = 'values',
+                                | 'changelog-mode' = 'I,UA,D',
+                                | 'source.produces-delete-by-key' = '$deleteByKey'
+                                |)
+                                |""".stripMargin)
+
+  private def createUpsertSink(
+      columns: String,
+      primaryKey: String,
+      deleteByKey: Boolean = false): Unit =
+    util.tableEnv.executeSql(s"""
+                                |create table sink (
+                                | $columns,
+                                | primary key ($primaryKey) not enforced
+                                |) with (
+                                | 'connector' = 'values',
+                                | 'sink-insert-only' = 'false',
+                                | 'sink.supports-delete-by-key' = '$deleteByKey'
+                                |)
+                                |""".stripMargin)
+
+  @Test
+  def testJoinUpsertKeyEquivalenceInnerJoinBasic(): Unit = {
+    // sink pk {a1, b2} is an upsert key via a1 = a2 -> no upsertMaterialize
+    createUpsertSource("src1", "a1 varchar, x1 varchar", "a1")
+    createUpsertSource("src2", "a2 varchar, b2 varchar, x2 varchar", "a2, b2")
+    createUpsertSink("a1 varchar, b2 varchar, x1 varchar", "a1, b2")
+    util.verifyExplainInsert(
+      """
+        |insert into sink
+        |select src1.a1, src2.b2, src1.x1
+        |from src1 join src2 on src1.a1 = src2.a2
+        |""".stripMargin,
+      ExplainDetail.CHANGELOG_MODE
+    )
+  }
+
+  @Test
+  def testJoinUpsertKeyEquivalenceMapNotSatisfied(): Unit = {
+    // "=" on MAP ignores the entry order, so equal maps needn't be the same key -> upsertMaterialize
+    createUpsertSource("src1", "a1 map<int, varchar>, x1 varchar", "a1")
+    createUpsertSource("src2", "a2 map<int, varchar>, b2 varchar, x2 varchar", "a2, b2")
+    createUpsertSink("a1 map<int, varchar>, b2 varchar, x1 varchar", "a1, b2")
+    util.verifyExplainInsert(
+      """
+        |insert into sink
+        |select src1.a1, src2.b2, src1.x1
+        |from src1 join src2 on src1.a1 = src2.a2
+        |on conflict do deduplicate
+        |""".stripMargin,
+      ExplainDetail.CHANGELOG_MODE
+    )
+  }
+
+  @Test
+  def testJoinUpsertKeyEquivalenceFullOuterJoinNotSatisfied(): Unit = {
+    // a full join's condition doesn't hold on padded rows; right-only rows have a1 = null, so sink
+    // pk {a1, b2} is not unique -> upsertMaterialize
+    createUpsertSource("src1", "a1 varchar, x1 varchar", "a1")
+    createUpsertSource("src2", "a2 varchar, b2 varchar, x2 varchar", "a2, b2")
+    createUpsertSink("a1 varchar, b2 varchar, x1 varchar", "a1, b2")
+    util.verifyExplainInsert(
+      """
+        |insert into sink
+        |select src1.a1, src2.b2, src1.x1
+        |from src1 full join src2 on src1.a1 = src2.a2
+        |on conflict do deduplicate
+        |""".stripMargin,
+      ExplainDetail.CHANGELOG_MODE
+    )
+  }
+
+  @Test
+  def testJoinUpsertKeyEquivalenceMultipleEquiConditions(): Unit = {
+    // sink pk {a1, b2} is an upsert key via a1 = a2 and b1 = b2 -> no upsertMaterialize
+    createUpsertSource("src1", "a1 varchar, b1 varchar, x1 varchar", "a1, b1")
+    createUpsertSource("src2", "a2 varchar, b2 varchar, x2 varchar", "a2, b2")
+    createUpsertSink("a1 varchar, b2 varchar, x1 varchar", "a1, b2")
+    util.verifyExplainInsert(
+      """
+        |insert into sink
+        |select src1.a1, src2.b2, src1.x1
+        |from src1 join src2 on src1.a1 = src2.a2 AND src1.b1 = src2.b2
+        |""".stripMargin,
+      ExplainDetail.CHANGELOG_MODE
+    )
+  }
+
+  @Test
+  def testJoinUpsertKeyEquivalenceNegativeCase(): Unit = {
+    // c2 is not in the join condition, so sink pk {a1, c2} is not covered -> upsertMaterialize
+    createUpsertSource("src1", "a1 varchar, x1 varchar", "a1")
+    createUpsertSource("src2", "a2 varchar, b2 varchar, c2 varchar", "a2, b2")
+    createUpsertSink("a1 varchar, c2 varchar, x1 varchar", "a1, c2")
+    util.verifyExplainInsert(
+      """
+        |insert into sink
+        |select src1.a1, src2.c2, src1.x1
+        |from src1 join src2 on src1.a1 = src2.a2
+        |on conflict do deduplicate
+        |""".stripMargin,
+      ExplainDetail.CHANGELOG_MODE
+    )
+  }
+
+  @Test
+  def testJoinUpsertKeyEquivalenceThreeWayJoin(): Unit = {
+    // a1 = a2 is in the lower join, whose calc projects a2 away and keeps the key {a2, b2} as
+    // {a1, b2} -> no upsertMaterialize
+    createUpsertSource("src1", "a1 varchar, x1 varchar", "a1")
+    createUpsertSource("src2", "a2 varchar, b2 varchar, x2 varchar", "a2, b2")
+    createUpsertSource("src3", "c3 varchar, y3 varchar", "c3")
+    createUpsertSink("a1 varchar, b2 varchar, y3 varchar", "a1, b2")
+    util.verifyExplainInsert(
+      """
+        |insert into sink
+        |select src1.a1, src2.b2, src3.y3
+        |from src1
+        |join src2 on src1.a1 = src2.a2
+        |join src3 on src2.b2 = src3.c3
+        |""".stripMargin,
+      ExplainDetail.CHANGELOG_MODE
+    )
+  }
+
+  @Test
+  def testJoinUpsertKeyEquivalenceMultiJoinOperator(): Unit = {
+    // same three-way join with the fused multi-join operator -> no upsertMaterialize
+    util.tableEnv.getConfig
+      .set(OptimizerConfigOptions.TABLE_OPTIMIZER_MULTI_JOIN_ENABLED, Boolean.box(true))
+    createUpsertSource("src1", "a1 varchar, x1 varchar", "a1")
+    createUpsertSource("src2", "a2 varchar, b2 varchar, x2 varchar", "a2, b2")
+    createUpsertSource("src3", "c3 varchar, y3 varchar", "c3")
+    createUpsertSink("a1 varchar, b2 varchar, y3 varchar", "a1, b2")
+    util.verifyExplainInsert(
+      """
+        |insert into sink
+        |select src1.a1, src2.b2, src3.y3
+        |from src1
+        |join src2 on src1.a1 = src2.a2
+        |join src3 on src2.b2 = src3.c3
+        |""".stripMargin,
+      ExplainDetail.CHANGELOG_MODE
+    )
+  }
+
+  @Test
+  def testJoinUpsertKeyEquivalenceMultiJoinLeftJoinNotSatisfied(): Unit = {
+    // c1 = d1 is in a left join's condition, so it doesn't hold for rows padded with nulls, and
+    // sink pk {k, d1} is not covered by the upsert key {k, c1} -> upsertMaterialize
+    util.tableEnv.getConfig
+      .set(OptimizerConfigOptions.TABLE_OPTIMIZER_MULTI_JOIN_ENABLED, Boolean.box(true))
+    createUpsertSource("src1", "k varchar, c1 varchar, d1 varchar not null", "k, c1")
+    createUpsertSource("src2", "k varchar, x2 varchar", "k")
+    createUpsertSource("src3", "k varchar, x3 varchar", "k")
+    createUpsertSink("k varchar, d1 varchar, x2 varchar, x3 varchar", "k, d1")
+    util.verifyExplainInsert(
+      """
+        |insert into sink
+        |select src1.k, src1.d1, src2.x2, src3.x3
+        |from src1
+        |left join src2 on src1.k = src2.k and src1.c1 = src1.d1
+        |left join src3 on src1.k = src3.k
+        |on conflict do deduplicate
+        |""".stripMargin,
+      ExplainDetail.CHANGELOG_MODE
+    )
+  }
+
+  @Test
+  def testJoinUpsertKeyEquivalenceMultiJoinChainedSubstitution(): Unit = {
+    // star join on src1.k: the upsert key {src3.k, m} reaches sink pk {src2.k, m} only through
+    // src3.k = src1.k = src2.k -> no upsertMaterialize
+    util.tableEnv.getConfig
+      .set(OptimizerConfigOptions.TABLE_OPTIMIZER_MULTI_JOIN_ENABLED, Boolean.box(true))
+    createUpsertSource("src1", "k varchar, x1 varchar", "k")
+    createUpsertSource("src2", "k varchar, x2 varchar", "k")
+    createUpsertSource("src3", "k varchar, m varchar, x3 varchar", "k, m")
+    createUpsertSink("k varchar, m varchar, x1 varchar", "k, m")
+    util.verifyExplainInsert(
+      """
+        |insert into sink
+        |select src2.k, src3.m, src1.x1
+        |from src1
+        |join src2 on src1.k = src2.k
+        |join src3 on src1.k = src3.k
+        |""".stripMargin,
+      ExplainDetail.CHANGELOG_MODE
+    )
+  }
+
+  @Test
+  def testJoinUpsertKeyEquivalenceMultiJoinInputCondition(): Unit = {
+    // multi-join [src1, t, src3] on k; m = m4 holds in the rows of its input t, so the upsert key
+    // {k, m} reaches sink pk {k, m4} -> no upsertMaterialize
+    util.tableEnv.getConfig
+      .set(OptimizerConfigOptions.TABLE_OPTIMIZER_MULTI_JOIN_ENABLED, Boolean.box(true))
+    createUpsertSource("src1", "k varchar, x1 varchar", "k")
+    createUpsertSource("src2", "k varchar, m varchar", "k, m")
+    createUpsertSource("src3", "k varchar, x3 varchar", "k")
+    createUpsertSource("src4", "m4 varchar, x4 varchar", "m4")
+    createUpsertSink("k varchar, m4 varchar, m varchar, x1 varchar, x3 varchar", "k, m4")
+    util.verifyExplainInsert(
+      """
+        |insert into sink
+        |select src1.k, t.m4, t.m, src1.x1, src3.x3
+        |from src1
+        |join (select src2.k, src2.m, src4.m4 from src2 join src4 on src2.m = src4.m4) t
+        |  on src1.k = t.k
+        |join src3 on src1.k = src3.k
+        |""".stripMargin,
+      ExplainDetail.CHANGELOG_MODE
+    )
+  }
+
+  @Test
+  def testJoinUpsertKeyEquivalenceThroughShuffleOnKey(): Unit = {
+    // the calc below the second join projects a2 away and keeps the key {a2, b2} as {a1, b2};
+    // the second join shuffles on a1, which the key contains -> no upsertMaterialize
+    createUpsertSource("src1", "a1 varchar, x1 varchar", "a1")
+    createUpsertSource("src2", "a2 varchar, b2 varchar, x2 varchar", "a2, b2")
+    createUpsertSource("src3", "c3 varchar, y3 varchar", "c3")
+    createUpsertSink("a1 varchar, b2 varchar, y3 varchar", "a1, b2")
+    util.verifyExplainInsert(
+      """
+        |insert into sink
+        |select t.a1, t.b2, src3.y3
+        |from (select src1.a1, src2.b2, src1.x1 from src1 join src2 on src1.a1 = src2.a2) t
+        |join src3 on t.a1 = src3.c3
+        |""".stripMargin,
+      ExplainDetail.CHANGELOG_MODE
+    )
+  }
+
+  @Test
+  def testJoinUpsertKeyEquivalenceThroughShuffleOnNonKeyNotSatisfied(): Unit = {
+    // same, but the second join shuffles on x1, which {a1, b2} doesn't contain: an update of x1
+    // reaches two tasks, so {a1, b2} is no upsert key of the output -> upsertMaterialize
+    createUpsertSource("src1", "a1 varchar, x1 varchar", "a1")
+    createUpsertSource("src2", "a2 varchar, b2 varchar, x2 varchar", "a2, b2")
+    createUpsertSource("src3", "c3 varchar, y3 varchar", "c3")
+    createUpsertSink("a1 varchar, b2 varchar, y3 varchar", "a1, b2")
+    util.verifyExplainInsert(
+      """
+        |insert into sink
+        |select t.a1, t.b2, src3.y3
+        |from (select src1.a1, src2.b2, src1.x1 from src1 join src2 on src1.a1 = src2.a2) t
+        |join src3 on t.x1 = src3.c3
+        |on conflict do deduplicate
+        |""".stripMargin,
+      ExplainDetail.CHANGELOG_MODE
+    )
+  }
+
+  @Test
+  def testJoinUpsertKeyEquivalenceMultiJoinThroughSecondInput(): Unit = {
+    // multi-join [src3, t, src4] on k; t projects a2 away and keeps its key {a2, b2} as {a1, b2}.
+    // src3 and src4 are unique on k, so t's key stays unique -> no upsertMaterialize
+    util.tableEnv.getConfig
+      .set(OptimizerConfigOptions.TABLE_OPTIMIZER_MULTI_JOIN_ENABLED, Boolean.box(true))
+    createUpsertSource("src1", "a1 varchar, x1 varchar", "a1")
+    createUpsertSource("src2", "a2 varchar, b2 varchar, x2 varchar", "a2, b2")
+    createUpsertSource("src3", "k varchar, y3 varchar", "k")
+    createUpsertSource("src4", "k4 varchar, y4 varchar", "k4")
+    createUpsertSink("a1 varchar, b2 varchar, y3 varchar, y4 varchar", "a1, b2")
+    util.verifyExplainInsert(
+      """
+        |insert into sink
+        |select t.a1, t.b2, src3.y3, src4.y4
+        |from src3
+        |join (select src1.a1, src2.b2 from src1 join src2 on src1.a1 = src2.a2) t
+        |  on src3.k = t.a1
+        |join src4 on src3.k = src4.k4
+        |""".stripMargin,
+      ExplainDetail.CHANGELOG_MODE
+    )
+  }
+
+  @Test
+  def testJoinUpsertKeyEquivalenceMultiJoinThroughSecondInputNotSatisfied(): Unit = {
+    // src0 is unique on its join columns {k, y}, but only k is joined to t: one row of t matches
+    // every y of src0 (and the src4 row with that y), so t's key {a1, b2} is not unique in the
+    // output -> upsertMaterialize
+    util.tableEnv.getConfig
+      .set(OptimizerConfigOptions.TABLE_OPTIMIZER_MULTI_JOIN_ENABLED, Boolean.box(true))
+    createUpsertSource("src0", "k varchar, y varchar, x0 varchar", "k, y")
+    createUpsertSource("src1", "a1 varchar, x1 varchar", "a1")
+    createUpsertSource("src2", "a2 varchar, b2 varchar, x2 varchar", "a2, b2")
+    createUpsertSource("src4", "k4 varchar, y4 varchar, x4 varchar", "k4, y4")
+    createUpsertSink("a1 varchar, b2 varchar, x0 varchar, x4 varchar", "a1, b2")
+    util.verifyExplainInsert(
+      """
+        |insert into sink
+        |select t.a1, t.b2, src0.x0, src4.x4
+        |from src0
+        |join (select src1.a1, src2.b2 from src1 join src2 on src1.a1 = src2.a2) t
+        |  on src0.k = t.a1
+        |join src4 on src0.k = src4.k4 and src0.y = src4.y4
+        |on conflict do deduplicate
+        |""".stripMargin,
+      ExplainDetail.CHANGELOG_MODE
+    )
+  }
+
+  @Test
+  def testJoinUpsertKeyEquivalenceTemporalJoin(): Unit = {
+    // event-time temporal join on cur = r_cur; the left key {o_id, cur} reaches sink pk
+    // {o_id, r_cur} through cur = r_cur -> no upsertMaterialize
+    createUpsertSource(
+      "orders",
+      "o_id varchar, cur varchar, amount int, ts timestamp(3), watermark for ts as ts",
+      "o_id, cur")
+    createUpsertSource(
+      "rates",
+      "r_cur varchar, rate int, ts timestamp(3), watermark for ts as ts",
+      "r_cur")
+    createUpsertSink("o_id varchar, r_cur varchar, amount int, rate int", "o_id, r_cur")
+    util.verifyExplainInsert(
+      """
+        |insert into sink
+        |select o.o_id, r.r_cur, o.amount, r.rate
+        |from orders o
+        |join rates for system_time as of o.ts as r on o.cur = r.r_cur
+        |""".stripMargin,
+      ExplainDetail.CHANGELOG_MODE
+    )
+  }
+
+  @Test
+  def testJoinUpsertKeyEquivalenceLeftTemporalJoinNotSatisfied(): Unit = {
+    // same with a left temporal join: r_cur is null in unmatched rows, so cur = r_cur doesn't hold
+    // in them and sink pk {o_id, r_cur} is not covered -> upsertMaterialize
+    createUpsertSource(
+      "orders",
+      "o_id varchar, cur varchar, amount int, ts timestamp(3), watermark for ts as ts",
+      "o_id, cur")
+    createUpsertSource(
+      "rates",
+      "r_cur varchar, rate int, ts timestamp(3), watermark for ts as ts",
+      "r_cur")
+    createUpsertSink("o_id varchar, r_cur varchar, amount int, rate int", "o_id, r_cur")
+    util.verifyExplainInsert(
+      """
+        |insert into sink
+        |select o.o_id, r.r_cur, o.amount, r.rate
+        |from orders o
+        |left join rates for system_time as of o.ts as r on o.cur = r.r_cur
+        |on conflict do deduplicate
+        |""".stripMargin,
+      ExplainDetail.CHANGELOG_MODE
+    )
+  }
+
+  @Test
+  def testJoinUpsertKeyEquivalenceNullableJoinColumn(): Unit = {
+    // a2 is a nullable group key, but the inner join makes a1 = a2 in every row, so the upsert key
+    // {a1, c1} reaches sink pk {a2, c1} -> no upsertMaterialize
+    createUpsertSource("src1", "a1 varchar, c1 varchar, x1 varchar", "a1, c1")
+    createUpsertSource("src2", "id2 varchar, a2 varchar, x2 varchar", "id2")
+    createUpsertSink("a2 varchar, c1 varchar, x1 varchar, cnt bigint", "a2, c1")
+    util.verifyExplainInsert(
+      """
+        |insert into sink
+        |select t2.a2, src1.c1, src1.x1, t2.cnt
+        |from src1
+        |join (select a2, count(*) as cnt from src2 group by a2) t2 on src1.a1 = t2.a2
+        |""".stripMargin,
+      ExplainDetail.CHANGELOG_MODE
+    )
+  }
+
+  @Test
+  def testJoinUpsertKeyEquivalenceNullSafeJoin(): Unit = {
+    // a1 IS NOT DISTINCT FROM a2 makes a1 and a2 equal or both null in every row, so the upsert key
+    // {a1, c1} reaches sink pk {a2, c1} -> no upsertMaterialize
+    createUpsertSource("src1", "id1 varchar, a1 varchar, c1 varchar", "id1")
+    createUpsertSource("src2", "id2 varchar, a2 varchar", "id2")
+    createUpsertSink("a2 varchar, c1 varchar, cnt bigint", "a2, c1")
+    util.verifyExplainInsert(
+      """
+        |insert into sink
+        |select t2.a2, t1.c1, t2.cnt
+        |from (select a1, c1 from src1 group by a1, c1) t1
+        |join (select a2, count(*) as cnt from src2 group by a2) t2
+        |  on t1.a1 is not distinct from t2.a2
+        |""".stripMargin,
+      ExplainDetail.CHANGELOG_MODE
+    )
+  }
+
+  @Test
+  def testJoinUpsertKeyEquivalenceDeleteByKey(): Unit = {
+    // sink pk {a1, b2} equals the upsert key {a2, b2} via a1 = a2, and a delete by key carries a1
+    // as well, so deletes stay by key end to end and no ChangelogNormalize is needed
+    createUpsertSource("src1", "a1 varchar, x1 varchar", "a1", deleteByKey = true)
+    createUpsertSource("src2", "a2 varchar, b2 varchar, x2 varchar", "a2, b2", deleteByKey = true)
+    createUpsertSink("a1 varchar, a2 varchar, b2 varchar, x1 varchar", "a1, b2", deleteByKey = true)
+    util.verifyExplainInsert(
+      """
+        |insert into sink
+        |select src1.a1, src2.a2, src2.b2, src1.x1
+        |from src1 join src2 on src1.a1 = src2.a2
+        |""".stripMargin,
+      ExplainDetail.CHANGELOG_MODE
+    )
+  }
+
+  @Test
+  def testJoinUpsertKeyEquivalenceDeleteByKeyEquatedColumnProjectedAway(): Unit = {
+    // a2 is projected away, but the calc keeps the upsert key {a2, b2} as {a1, b2} and carries a1
+    // in a delete by key, so deletes stay by key end to end
+    createUpsertSource("src1", "a1 varchar, x1 varchar", "a1", deleteByKey = true)
+    createUpsertSource("src2", "a2 varchar, b2 varchar, x2 varchar", "a2, b2", deleteByKey = true)
+    createUpsertSink("a1 varchar, b2 varchar, x1 varchar", "a1, b2", deleteByKey = true)
+    util.verifyExplainInsert(
+      """
+        |insert into sink
+        |select src1.a1, src2.b2, src1.x1
+        |from src1 join src2 on src1.a1 = src2.a2
+        |""".stripMargin,
+      ExplainDetail.CHANGELOG_MODE
+    )
+  }
+}

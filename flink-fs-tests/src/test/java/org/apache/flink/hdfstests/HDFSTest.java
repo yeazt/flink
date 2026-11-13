@@ -18,23 +18,27 @@
 
 package org.apache.flink.hdfstests;
 
+import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.io.FileOutputFormat;
-import org.apache.flink.api.java.ExecutionEnvironment;
-import org.apache.flink.api.java.ExecutionEnvironmentFactory;
-import org.apache.flink.api.java.LocalEnvironment;
-import org.apache.flink.api.java.io.AvroOutputFormat;
+import org.apache.flink.api.common.io.FirstAttemptInitializationContext;
+import org.apache.flink.configuration.BlobServerOptions;
 import org.apache.flink.configuration.ConfigConstants;
-import org.apache.flink.configuration.CoreOptions;
 import org.apache.flink.configuration.HighAvailabilityOptions;
 import org.apache.flink.core.fs.FileSystem;
 import org.apache.flink.core.fs.Path;
-import org.apache.flink.examples.java.wordcount.WordCount;
-import org.apache.flink.runtime.blob.BlobRecoveryITCase;
 import org.apache.flink.runtime.blob.BlobStoreService;
 import org.apache.flink.runtime.blob.BlobUtils;
+import org.apache.flink.runtime.blob.TestingBlobHelpers;
 import org.apache.flink.runtime.fs.hdfs.HadoopFileSystem;
 import org.apache.flink.runtime.jobmanager.HighAvailabilityMode;
-import org.apache.flink.util.FileUtils;
+import org.apache.flink.streaming.api.environment.LocalStreamEnvironment;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironmentFactory;
+import org.apache.flink.streaming.api.legacy.io.TextOutputFormat;
+import org.apache.flink.streaming.examples.wordcount.WordCount;
+import org.apache.flink.testutils.junit.utils.TempDirUtils;
+import org.apache.flink.util.ExceptionUtils;
+import org.apache.flink.util.OperatingSystem;
 
 import org.apache.commons.io.IOUtils;
 import org.apache.hadoop.conf.Configuration;
@@ -42,230 +46,299 @@ import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
-import org.junit.After;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.File;
 import java.io.IOException;
 import java.io.StringWriter;
-import java.util.Arrays;
-import java.util.UUID;
+import java.util.ArrayList;
+import java.util.List;
 
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.fail;
+import static org.assertj.core.api.Assumptions.assumeThat;
 
 /**
- * This test should logically be located in the 'flink-runtime' tests. However, this project
- * has already all dependencies required (flink-java-examples). Also, the ParallelismOneExecEnv is here.
+ * This test should logically be located in the 'flink-runtime' tests. However, this project has
+ * already all dependencies required (flink-examples-streaming). Also, the ParallelismOneExecEnv is
+ * here.
  */
-public class HDFSTest {
+class HDFSTest {
 
-	protected String hdfsURI;
-	private MiniDFSCluster hdfsCluster;
-	private org.apache.hadoop.fs.Path hdPath;
-	protected org.apache.hadoop.fs.FileSystem hdfs;
+    protected String hdfsURI;
+    private MiniDFSCluster hdfsCluster;
+    private org.apache.hadoop.fs.Path hdPath;
+    protected org.apache.hadoop.fs.FileSystem hdfs;
 
-	@Before
-	public void createHDFS() {
-		try {
-			Configuration hdConf = new Configuration();
+    @TempDir java.nio.file.Path temporaryFolder;
 
-			File baseDir = new File("./target/hdfs/hdfsTest").getAbsoluteFile();
-			FileUtil.fullyDelete(baseDir);
-			hdConf.set(MiniDFSCluster.HDFS_MINIDFS_BASEDIR, baseDir.getAbsolutePath());
-			MiniDFSCluster.Builder builder = new MiniDFSCluster.Builder(hdConf);
-			hdfsCluster = builder.build();
+    @BeforeAll
+    static void verifyOS() {
+        assumeThat(OperatingSystem.isWindows())
+                .as("HDFS cluster cannot be started on Windows without extensions.")
+                .isFalse();
+    }
 
-			hdfsURI = "hdfs://" + hdfsCluster.getURI().getHost() + ":" + hdfsCluster.getNameNodePort() + "/";
+    @BeforeEach
+    void createHDFS() {
+        try {
+            Configuration hdConf = new Configuration();
 
-			hdPath = new org.apache.hadoop.fs.Path("/test");
-			hdfs = hdPath.getFileSystem(hdConf);
-			FSDataOutputStream stream = hdfs.create(hdPath);
-			for (int i = 0; i < 10; i++) {
-				stream.write("Hello HDFS\n".getBytes(ConfigConstants.DEFAULT_CHARSET));
-			}
-			stream.close();
+            File baseDir = new File("./target/hdfs/hdfsTest").getAbsoluteFile();
+            FileUtil.fullyDelete(baseDir);
+            hdConf.set(MiniDFSCluster.HDFS_MINIDFS_BASEDIR, baseDir.getAbsolutePath());
+            MiniDFSCluster.Builder builder = new MiniDFSCluster.Builder(hdConf);
+            hdfsCluster = builder.build();
 
-		} catch (Throwable e) {
-			e.printStackTrace();
-			Assert.fail("Test failed " + e.getMessage());
-		}
-	}
+            hdfsURI =
+                    "hdfs://"
+                            + hdfsCluster.getURI().getHost()
+                            + ":"
+                            + hdfsCluster.getNameNodePort()
+                            + "/";
 
-	@After
-	public void destroyHDFS() {
-		try {
-			hdfs.delete(hdPath, false);
-			hdfsCluster.shutdown();
-		} catch (IOException e) {
-			throw new RuntimeException(e);
-		}
+            hdPath = new org.apache.hadoop.fs.Path("/test");
+            hdfs = hdPath.getFileSystem(hdConf);
+            FSDataOutputStream stream = hdfs.create(hdPath);
+            for (int i = 0; i < 10; i++) {
+                stream.write("Hello HDFS\n".getBytes(ConfigConstants.DEFAULT_CHARSET));
+            }
+            stream.close();
 
-	}
+        } catch (Throwable e) {
+            e.printStackTrace();
+            fail("Test failed " + e.getMessage());
+        }
+    }
 
-	@Test
-	public void testHDFS() {
+    @AfterEach
+    void destroyHDFS() {
+        try {
+            hdfs.delete(hdPath, false);
+            hdfsCluster.shutdown();
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
 
-		Path file = new Path(hdfsURI + hdPath);
-		org.apache.hadoop.fs.Path result = new org.apache.hadoop.fs.Path(hdfsURI + "/result");
-		try {
-			FileSystem fs = file.getFileSystem();
-			assertTrue("Must be HadoopFileSystem", fs instanceof HadoopFileSystem);
+    @Test
+    void testHDFS() {
 
-			DopOneTestEnvironment.setAsContext();
-			try {
-				WordCount.main(new String[]{
-						"--input", file.toString(),
-						"--output", result.toString()});
-			}
-			catch (Throwable t) {
-				t.printStackTrace();
-				Assert.fail("Test failed with " + t.getMessage());
-			}
-			finally {
-				DopOneTestEnvironment.unsetAsContext();
-			}
+        Path file = new Path(hdfsURI + hdPath);
+        org.apache.hadoop.fs.Path result = new org.apache.hadoop.fs.Path(hdfsURI + "/result");
+        try {
+            FileSystem fs = file.getFileSystem();
+            assertThat(fs).as("Must be HadoopFileSystem").isInstanceOf(HadoopFileSystem.class);
 
-			assertTrue("No result file present", hdfs.exists(result));
+            DopOneTestEnvironment.setAsContext();
+            try {
+                WordCount.main(
+                        new String[] {
+                            "--input", file.toString(),
+                            "--output", result.toString(),
+                            "--execution-mode", "BATCH"
+                        });
+            } catch (Throwable t) {
+                t.printStackTrace();
+                fail("Test failed with " + t.getMessage());
+            } finally {
+                DopOneTestEnvironment.unsetAsContext();
+            }
 
-			// validate output:
-			org.apache.hadoop.fs.FSDataInputStream inStream = hdfs.open(result);
-			StringWriter writer = new StringWriter();
-			IOUtils.copy(inStream, writer);
-			String resultString = writer.toString();
+            assertThat(hdfs.exists(result)).as("No result file present").isTrue();
 
-			Assert.assertEquals("hdfs 10\n" +
-					"hello 10\n", resultString);
-			inStream.close();
+            // validate output:
+            StringWriter writer = new StringWriter();
+            List<FileStatus> fileStatusList = new ArrayList<>();
+            getAllFileInDirectory(result, fileStatusList);
+            for (FileStatus fileStatus : fileStatusList) {
+                org.apache.hadoop.fs.FSDataInputStream inStream = hdfs.open(fileStatus.getPath());
+                IOUtils.copy(inStream, writer);
+                inStream.close();
+            }
 
-		} catch (IOException e) {
-			e.printStackTrace();
-			Assert.fail("Error in test: " + e.getMessage());
-		}
-	}
+            String resultString = writer.toString();
 
-	@Test
-	public void testAvroOut() {
-		String type = "one";
-		AvroOutputFormat<String> avroOut =
-				new AvroOutputFormat<String>(String.class);
+            assertThat(resultString).isEqualTo("(hdfs,10)\n" + "(hello,10)\n");
 
-		org.apache.hadoop.fs.Path result = new org.apache.hadoop.fs.Path(hdfsURI + "/avroTest");
+        } catch (IOException e) {
+            e.printStackTrace();
+            fail("Error in test: " + e.getMessage());
+        }
+    }
 
-		avroOut.setOutputFilePath(new Path(result.toString()));
-		avroOut.setWriteMode(FileSystem.WriteMode.NO_OVERWRITE);
-		avroOut.setOutputDirectoryMode(FileOutputFormat.OutputDirectoryMode.ALWAYS);
+    @Test
+    void testChangingFileNames() {
+        org.apache.hadoop.fs.Path hdfsPath = new org.apache.hadoop.fs.Path(hdfsURI + "/hdfsTest");
+        Path path = new Path(hdfsPath.toString());
 
-		try {
-			avroOut.open(0, 2);
-			avroOut.writeRecord(type);
-			avroOut.close();
+        String type = "one";
+        TextOutputFormat<String> outputFormat = new TextOutputFormat<>(path);
 
-			avroOut.open(1, 2);
-			avroOut.writeRecord(type);
-			avroOut.close();
+        outputFormat.setWriteMode(FileSystem.WriteMode.NO_OVERWRITE);
+        outputFormat.setOutputDirectoryMode(FileOutputFormat.OutputDirectoryMode.ALWAYS);
 
-			assertTrue("No result file present", hdfs.exists(result));
-			FileStatus[] files = hdfs.listStatus(result);
-			Assert.assertEquals(2, files.length);
-			for (FileStatus file : files) {
-				assertTrue("1.avro".equals(file.getPath().getName()) || "2.avro".equals(file.getPath().getName()));
-			}
+        try {
+            outputFormat.open(FirstAttemptInitializationContext.of(0, 2));
+            outputFormat.writeRecord(type);
+            outputFormat.close();
 
-		} catch (IOException e) {
-			e.printStackTrace();
-			Assert.fail(e.getMessage());
-		}
-	}
+            outputFormat.open(FirstAttemptInitializationContext.of(1, 2));
+            outputFormat.writeRecord(type);
+            outputFormat.close();
 
-	/**
-	 * Test that {@link FileUtils#deletePathIfEmpty(FileSystem, Path)} deletes the path if it is
-	 * empty. A path can only be empty if it is a directory which does not contain any
-	 * files/directories.
-	 */
-	@Test
-	public void testDeletePathIfEmpty() throws IOException {
-		final Path basePath = new Path(hdfsURI);
-		final Path directory = new Path(basePath, UUID.randomUUID().toString());
-		final Path directoryFile = new Path(directory, UUID.randomUUID().toString());
-		final Path singleFile = new Path(basePath, UUID.randomUUID().toString());
+            assertThat(hdfs.exists(hdfsPath)).as("No result file present").isTrue();
+            FileStatus[] files = hdfs.listStatus(hdfsPath);
+            assertThat(files)
+                    .extracting(file -> file.getPath().getName())
+                    .containsExactlyInAnyOrder("1", "2");
 
-		FileSystem fs = basePath.getFileSystem();
+        } catch (IOException e) {
+            e.printStackTrace();
+            fail(e.getMessage());
+        }
+    }
 
-		fs.mkdirs(directory);
+    /**
+     * Tests that with {@link HighAvailabilityMode#ZOOKEEPER} distributed JARs are recoverable from
+     * any participating BlobServer when talking to the {@link
+     * org.apache.flink.runtime.blob.BlobServer} directly.
+     */
+    @Test
+    void testBlobServerRecovery() throws Exception {
+        org.apache.flink.configuration.Configuration config =
+                new org.apache.flink.configuration.Configuration();
+        config.set(HighAvailabilityOptions.HA_MODE, "ZOOKEEPER");
+        config.set(
+                BlobServerOptions.STORAGE_DIRECTORY,
+                TempDirUtils.newFolder(temporaryFolder).getAbsolutePath());
+        config.set(HighAvailabilityOptions.HA_STORAGE_PATH, hdfsURI);
 
-		byte[] data = "HDFSTest#testDeletePathIfEmpty".getBytes(ConfigConstants.DEFAULT_CHARSET);
+        BlobStoreService blobStoreService = BlobUtils.createBlobStoreFromConfig(config);
 
-		for (Path file: Arrays.asList(singleFile, directoryFile)) {
-			org.apache.flink.core.fs.FSDataOutputStream outputStream = fs.create(file, true);
-			outputStream.write(data);
-			outputStream.close();
-		}
+        try {
+            TestingBlobHelpers.testBlobServerRecovery(
+                    config, blobStoreService, TempDirUtils.newFolder(temporaryFolder));
+        } finally {
+            blobStoreService.cleanupAllData();
+            blobStoreService.close();
+        }
+    }
 
-		// verify that the files have been created
-		assertTrue(fs.exists(singleFile));
-		assertTrue(fs.exists(directoryFile));
+    /**
+     * Tests that with {@link HighAvailabilityMode#ZOOKEEPER} distributed corrupted JARs are
+     * recognised during the download via a {@link org.apache.flink.runtime.blob.BlobServer}.
+     */
+    @Test
+    void testBlobServerCorruptedFile() throws Exception {
+        org.apache.flink.configuration.Configuration config =
+                new org.apache.flink.configuration.Configuration();
+        config.set(HighAvailabilityOptions.HA_MODE, "ZOOKEEPER");
+        config.set(
+                BlobServerOptions.STORAGE_DIRECTORY,
+                TempDirUtils.newFolder(temporaryFolder).getAbsolutePath());
+        config.set(HighAvailabilityOptions.HA_STORAGE_PATH, hdfsURI);
 
-		// delete the single file
-		assertFalse(FileUtils.deletePathIfEmpty(fs, singleFile));
-		assertTrue(fs.exists(singleFile));
+        BlobStoreService blobStoreService = BlobUtils.createBlobStoreFromConfig(config);
 
-		// try to delete the non-empty directory
-		assertFalse(FileUtils.deletePathIfEmpty(fs, directory));
-		assertTrue(fs.exists(directory));
+        try {
+            TestingBlobHelpers.testGetFailsFromCorruptFile(
+                    config, blobStoreService, TempDirUtils.newFolder(temporaryFolder));
+        } finally {
+            blobStoreService.cleanupAllData();
+            blobStoreService.close();
+        }
+    }
 
-		// delete the file contained in the directory
-		assertTrue(fs.delete(directoryFile, false));
+    /**
+     * Tests that with {@link HighAvailabilityMode#ZOOKEEPER} distributed JARs are recoverable from
+     * any participating BlobServer when uploaded via a BLOB cache.
+     */
+    @Test
+    void testBlobCacheRecovery() throws Exception {
+        org.apache.flink.configuration.Configuration config =
+                new org.apache.flink.configuration.Configuration();
+        config.set(HighAvailabilityOptions.HA_MODE, "ZOOKEEPER");
+        config.set(
+                BlobServerOptions.STORAGE_DIRECTORY,
+                TempDirUtils.newFolder(temporaryFolder).getAbsolutePath());
+        config.set(HighAvailabilityOptions.HA_STORAGE_PATH, hdfsURI);
 
-		// now the deletion should work
-		assertTrue(FileUtils.deletePathIfEmpty(fs, directory));
-		assertFalse(fs.exists(directory));
-	}
+        BlobStoreService blobStoreService = BlobUtils.createBlobStoreFromConfig(config);
 
-	/**
-	 * Tests that with {@link HighAvailabilityMode#ZOOKEEPER} distributed JARs are recoverable from any
-	 * participating BlobServer.
-	 */
-	@Test
-	public void testBlobServerRecovery() throws Exception {
-		org.apache.flink.configuration.Configuration
-			config = new org.apache.flink.configuration.Configuration();
-		config.setString(HighAvailabilityOptions.HA_MODE, "ZOOKEEPER");
-		config.setString(CoreOptions.STATE_BACKEND, "ZOOKEEPER");
-		config.setString(HighAvailabilityOptions.HA_STORAGE_PATH, hdfsURI);
+        try {
+            TestingBlobHelpers.testBlobCacheRecovery(
+                    config, blobStoreService, TempDirUtils.newFolder(temporaryFolder));
+        } finally {
+            blobStoreService.cleanupAllData();
+            blobStoreService.close();
+        }
+    }
 
-		BlobStoreService blobStoreService = null;
+    /**
+     * Tests that with {@link HighAvailabilityMode#ZOOKEEPER} distributed corrupted JARs are
+     * recognised during the download via a BLOB cache.
+     */
+    @Test
+    void testBlobCacheCorruptedFile() throws Exception {
+        org.apache.flink.configuration.Configuration config =
+                new org.apache.flink.configuration.Configuration();
+        config.set(HighAvailabilityOptions.HA_MODE, "ZOOKEEPER");
+        config.set(
+                BlobServerOptions.STORAGE_DIRECTORY,
+                TempDirUtils.newFolder(temporaryFolder).getAbsolutePath());
+        config.set(HighAvailabilityOptions.HA_STORAGE_PATH, hdfsURI);
 
-		try {
-			blobStoreService = BlobUtils.createBlobStoreFromConfig(config);
+        BlobStoreService blobStoreService = BlobUtils.createBlobStoreFromConfig(config);
 
-			BlobRecoveryITCase.testBlobServerRecovery(config, blobStoreService);
-		} finally {
-			if (blobStoreService != null) {
-				blobStoreService.closeAndCleanupAllData();
-			}
-		}
-	}
+        try {
+            TestingBlobHelpers.testGetFailsFromCorruptFile(
+                    new JobID(), config, blobStoreService, TempDirUtils.newFolder(temporaryFolder));
+        } finally {
+            blobStoreService.cleanupAllData();
+            blobStoreService.close();
+        }
+    }
 
-	abstract static class DopOneTestEnvironment extends ExecutionEnvironment {
+    abstract static class DopOneTestEnvironment extends StreamExecutionEnvironment {
 
-		public static void setAsContext() {
-			final LocalEnvironment le = new LocalEnvironment();
-			le.setParallelism(1);
+        public static void setAsContext() {
+            final LocalStreamEnvironment le = new LocalStreamEnvironment();
+            le.setParallelism(1);
 
-			initializeContextEnvironment(new ExecutionEnvironmentFactory() {
+            initializeContextEnvironment(
+                    new StreamExecutionEnvironmentFactory() {
 
-				@Override
-				public ExecutionEnvironment createExecutionEnvironment() {
-					return le;
-				}
-			});
-		}
+                        @Override
+                        public StreamExecutionEnvironment createExecutionEnvironment(
+                                org.apache.flink.configuration.Configuration configuration) {
+                            return le;
+                        }
+                    });
+        }
 
-		public static void unsetAsContext() {
-			resetContextEnvironment();
-		}
-	}
+        public static void unsetAsContext() {
+            resetContextEnvironment();
+        }
+    }
+
+    private void getAllFileInDirectory(
+            org.apache.hadoop.fs.Path hdfsDir, List<FileStatus> fileStatusList) {
+        try {
+            FileStatus[] fileStatuses = hdfs.listStatus(hdfsDir);
+            for (FileStatus fileStatus : fileStatuses) {
+                if (fileStatus.isDirectory()) {
+                    getAllFileInDirectory(fileStatus.getPath(), fileStatusList);
+                } else {
+                    fileStatusList.add(fileStatus);
+                }
+            }
+        } catch (Exception e) {
+            ExceptionUtils.rethrow(e);
+        }
+    }
 }

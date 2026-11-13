@@ -18,47 +18,60 @@
 
 package org.apache.flink.runtime.blob;
 
+import org.apache.flink.api.common.ApplicationID;
 import org.apache.flink.api.common.JobID;
 
 import java.io.File;
 import java.io.IOException;
 
-/**
- * A blob store doing nothing.
- */
+/** A blob store doing nothing. */
 public class VoidBlobStore implements BlobStoreService {
 
-	@Override
-	public void put(File localFile, BlobKey blobKey) throws IOException {
-	}
+    @Override
+    public boolean put(File localFile, JobID jobId, BlobKey blobKey) throws IOException {
+        return false;
+    }
 
-	@Override
-	public void put(File localFile, JobID jobId, String key) throws IOException {
-	}
+    @Override
+    public boolean get(JobID jobId, BlobKey blobKey, File localFile) throws IOException {
+        return false;
+    }
 
-	@Override
-	public void get(BlobKey blobKey, File localFile) throws IOException {
-	}
+    @Override
+    public boolean delete(JobID jobId, BlobKey blobKey) {
+        return true;
+    }
 
-	@Override
-	public void get(JobID jobId, String key, File localFile) throws IOException {
-	}
+    @Override
+    public boolean deleteAll(JobID jobId) {
+        return true;
+    }
 
-	@Override
-	public void delete(BlobKey blobKey) {
-	}
+    @Override
+    public boolean put(File localFile, ApplicationID applicationId, BlobKey blobKey)
+            throws IOException {
+        return false;
+    }
 
-	@Override
-	public void delete(JobID jobId, String key) {
-	}
+    @Override
+    public boolean get(ApplicationID applicationId, BlobKey blobKey, File localFile)
+            throws IOException {
+        return false;
+    }
 
-	@Override
-	public void deleteAll(JobID jobId) {
-	}
+    @Override
+    public boolean delete(ApplicationID applicationId, BlobKey blobKey) {
+        return true;
+    }
 
-	@Override
-	public void closeAndCleanupAllData() {}
+    @Override
+    public boolean deleteAll(ApplicationID applicationId) {
+        return true;
+    }
 
-	@Override
-	public void close() throws IOException {}
+    @Override
+    public void cleanupAllData() {}
+
+    @Override
+    public void close() throws IOException {}
 }

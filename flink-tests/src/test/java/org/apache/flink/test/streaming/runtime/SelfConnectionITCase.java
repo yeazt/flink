@@ -18,152 +18,104 @@
 package org.apache.flink.test.streaming.runtime;
 
 import org.apache.flink.api.common.functions.FlatMapFunction;
-import org.apache.flink.api.common.functions.MapFunction;
-import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.co.CoMapFunction;
-import org.apache.flink.streaming.util.StreamingMultipleProgramsTestBase;
 import org.apache.flink.test.streaming.runtime.util.TestListResultSink;
+import org.apache.flink.test.util.AbstractTestBase;
 import org.apache.flink.util.Collector;
 
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.List;
+import static org.assertj.core.api.Assertions.assertThat;
 
-import static org.junit.Assert.assertEquals;
+/** Integration tests for connected streams. */
+class SelfConnectionITCase extends AbstractTestBase {
 
-public class SelfConnectionITCase extends StreamingMultipleProgramsTestBase {
+    /** We connect two different data streams in a chain to a CoMap. */
+    @Test
+    void differentDataStreamSameChain() throws Exception {
 
-	/**
-	 * We connect two different data streams in a chain to a CoMap.
-	 */
-	@Test
-	public void differentDataStreamSameChain() throws Exception {
+        TestListResultSink<String> resultSink = new TestListResultSink<>();
 
-		TestListResultSink<String> resultSink = new TestListResultSink<String>();
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
 
-		StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-		env.setParallelism(1);
+        DataStream<Integer> src = env.fromData(1, 3, 5);
 
-		DataStream<Integer> src = env.fromElements(1, 3, 5);
+        DataStream<String> stringMap = src.map(value -> "x " + value);
 
-		DataStream<String> stringMap = src.map(new MapFunction<Integer, String>() {
-			private static final long serialVersionUID = 1L;
+        stringMap
+                .connect(src)
+                .map(
+                        new CoMapFunction<String, Integer, String>() {
 
-			@Override
-			public String map(Integer value) throws Exception {
-				return "x " + value;
-			}
-		});
+                            @Override
+                            public String map1(String value) {
+                                return value;
+                            }
 
-		stringMap.connect(src).map(new CoMapFunction<String, Integer, String>() {
+                            @Override
+                            public String map2(Integer value) {
+                                return String.valueOf(value + 1);
+                            }
+                        })
+                .addSink(resultSink);
 
-			private static final long serialVersionUID = 1L;
+        env.execute();
 
-			@Override
-			public String map1(String value) {
-				return value;
-			}
+        assertThat(resultSink.getResult())
+                .containsExactlyInAnyOrder("x 1", "x 3", "x 5", "2", "4", "6");
+    }
 
-			@Override
-			public String map2(Integer value) {
-				return String.valueOf(value + 1);
-			}
-		}).addSink(resultSink);
+    /**
+     * We connect two different data streams in different chains to a CoMap. (This is not actually
+     * self-connect.)
+     */
+    @Test
+    void differentDataStreamDifferentChain() throws Exception {
 
-		env.execute();
+        TestListResultSink<String> resultSink = new TestListResultSink<>();
 
-		List<String> expected = Arrays.asList("x 1", "x 3", "x 5", "2", "4", "6");
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(3);
 
-		List<String> result = resultSink.getResult();
+        DataStream<Integer> src = env.fromData(1, 3, 5).disableChaining();
 
-		Collections.sort(expected);
-		Collections.sort(result);
+        DataStream<String> stringMap =
+                src.flatMap(
+                                new FlatMapFunction<Integer, String>() {
 
-		assertEquals(expected, result);
-	}
+                                    @Override
+                                    public void flatMap(Integer value, Collector<String> out)
+                                            throws Exception {
+                                        out.collect("x " + value);
+                                    }
+                                })
+                        .keyBy(String::length);
 
-	/**
-	 * We connect two different data streams in different chains to a CoMap.
-	 * (This is not actually self-connect.)
-	 */
-	@Test
-	public void differentDataStreamDifferentChain() {
+        DataStream<Long> longMap = src.map(value -> (long) (value + 1)).keyBy(Long::intValue);
 
-		TestListResultSink<String> resultSink = new TestListResultSink<String>();
+        stringMap
+                .connect(longMap)
+                .map(
+                        new CoMapFunction<String, Long, String>() {
 
-		StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-		env.setParallelism(3);
+                            @Override
+                            public String map1(String value) {
+                                return value;
+                            }
 
-		DataStream<Integer> src = env.fromElements(1, 3, 5).disableChaining();
+                            @Override
+                            public String map2(Long value) {
+                                return value.toString();
+                            }
+                        })
+                .addSink(resultSink);
 
-		DataStream<String> stringMap = src.flatMap(new FlatMapFunction<Integer, String>() {
+        env.execute();
 
-			private static final long serialVersionUID = 1L;
-
-			@Override
-			public void flatMap(Integer value, Collector<String> out) throws Exception {
-				out.collect("x " + value);
-			}
-		}).keyBy(new KeySelector<String, Integer>() {
-
-			private static final long serialVersionUID = 1L;
-
-			@Override
-			public Integer getKey(String value) throws Exception {
-				return value.length();
-			}
-		});
-
-		DataStream<Long> longMap = src.map(new MapFunction<Integer, Long>() {
-
-			private static final long serialVersionUID = 1L;
-
-			@Override
-			public Long map(Integer value) throws Exception {
-				return (long) (value + 1);
-			}
-		}).keyBy(new KeySelector<Long, Integer>() {
-
-			private static final long serialVersionUID = 1L;
-
-			@Override
-			public Integer getKey(Long value) throws Exception {
-				return value.intValue();
-			}
-		});
-
-
-		stringMap.connect(longMap).map(new CoMapFunction<String, Long, String>() {
-
-			private static final long serialVersionUID = 1L;
-
-			@Override
-			public String map1(String value) {
-				return value;
-			}
-
-			@Override
-			public String map2(Long value) {
-				return value.toString();
-			}
-		}).addSink(resultSink);
-
-		try {
-			env.execute();
-		} catch (Exception e) {
-			e.printStackTrace();
-		}
-
-		List<String> expected = Arrays.asList("x 1", "x 3", "x 5", "2", "4", "6");
-		List<String> result = resultSink.getResult();
-
-		Collections.sort(expected);
-		Collections.sort(result);
-
-		assertEquals(expected, result);
-	}
+        assertThat(resultSink.getResult())
+                .containsExactlyInAnyOrder("x 1", "x 3", "x 5", "2", "4", "6");
+    }
 }

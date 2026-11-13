@@ -15,8 +15,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.flink.test.state.operator.restore.unkeyed;
 
+import org.apache.flink.FlinkVersion;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -29,31 +31,30 @@ import static org.apache.flink.test.state.operator.restore.unkeyed.NonKeyedJob.c
 import static org.apache.flink.test.state.operator.restore.unkeyed.NonKeyedJob.createStatelessMap;
 import static org.apache.flink.test.state.operator.restore.unkeyed.NonKeyedJob.createThirdStatefulMap;
 
-/**
- * All classes extending this class will use the same savepoint and migration job.
- */
-public abstract class AbstractNonKeyedOperatorRestoreTestBase extends AbstractOperatorRestoreTestBase {
+/** Base class for all non-keyed operator restore tests. */
+abstract class AbstractNonKeyedOperatorRestoreTestBase extends AbstractOperatorRestoreTestBase {
 
-	@Override
-	public void createMigrationJob(StreamExecutionEnvironment env) {
-		/**
-		 * Source -> StatefulMap1 -> CHAIN(StatefulMap2 -> Map -> StatefulMap3)
-		 */
-		DataStream<Integer> source = createSource(env, ExecutionMode.MIGRATE);
+    @Override
+    protected void createMigrationJob(StreamExecutionEnvironment env) {
+        /** Source -> StatefulMap1 -> CHAIN(StatefulMap2 -> Map -> StatefulMap3) */
+        DataStream<Integer> source = createSource(env, ExecutionMode.MIGRATE);
 
-		SingleOutputStreamOperator<Integer> first = createFirstStatefulMap(ExecutionMode.MIGRATE, source);
-		first.startNewChain();
+        SingleOutputStreamOperator<Integer> first =
+                createFirstStatefulMap(ExecutionMode.MIGRATE, source);
+        first.startNewChain();
 
-		SingleOutputStreamOperator<Integer> second = createSecondStatefulMap(ExecutionMode.MIGRATE, first);
-		second.startNewChain();
+        SingleOutputStreamOperator<Integer> second =
+                createSecondStatefulMap(ExecutionMode.MIGRATE, first);
+        second.startNewChain();
 
-		SingleOutputStreamOperator<Integer> stateless = createStatelessMap(second);
+        SingleOutputStreamOperator<Integer> stateless = createStatelessMap(second);
 
-		SingleOutputStreamOperator<Integer> third = createThirdStatefulMap(ExecutionMode.MIGRATE, stateless);
-	}
+        SingleOutputStreamOperator<Integer> third =
+                createThirdStatefulMap(ExecutionMode.MIGRATE, stateless);
+    }
 
-	@Override
-	protected final String getMigrationSavepointName() {
-		return "nonKeyed";
-	}
+    @Override
+    protected String getMigrationSavepointName(FlinkVersion flinkVersion) {
+        return "nonKeyed-flink" + flinkVersion;
+    }
 }

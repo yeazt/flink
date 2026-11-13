@@ -18,71 +18,76 @@
 
 package org.apache.flink.client.cli;
 
-import org.apache.flink.client.ClientUtils;
-import org.apache.flink.client.deployment.StandaloneClusterDescriptor;
-import org.apache.flink.client.program.StandaloneClusterClient;
+import org.apache.flink.client.deployment.executors.RemoteExecutor;
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.configuration.HighAvailabilityOptions;
+import org.apache.flink.configuration.DeploymentOptions;
+import org.apache.flink.configuration.RestOptions;
+import org.apache.flink.configuration.SecurityOptions;
+import org.apache.flink.util.FlinkException;
+import org.apache.flink.util.NetUtils;
 
 import org.apache.commons.cli.CommandLine;
+import org.apache.commons.cli.Option;
 import org.apache.commons.cli.Options;
 
 import java.net.InetSocketAddress;
 import java.net.URL;
-import java.util.List;
 
-import static org.apache.flink.client.CliFrontend.setJobManagerAddressInConfig;
+import static org.apache.flink.client.cli.CliFrontend.setJobManagerAddressInConfig;
 
-/**
- * The default CLI which is used for interaction with standalone clusters.
- */
-public class DefaultCLI implements CustomCommandLine<StandaloneClusterClient> {
+/** The default CLI which is used for interaction with standalone clusters. */
+public class DefaultCLI extends AbstractCustomCommandLine {
 
-	@Override
-	public boolean isActive(CommandLine commandLine, Configuration configuration) {
-		// always active because we can try to read a JobManager address from the config
-		return true;
-	}
+    public static final String ID = "default";
 
-	@Override
-	public String getId() {
-		return null;
-	}
+    private static final Option addressOption =
+            new Option(
+                    "m",
+                    "jobmanager",
+                    true,
+                    "Address of the JobManager to which to connect. "
+                            + "Use this flag to connect to a different JobManager than the one specified in the configuration. "
+                            + "Attention: This option is respected only if the high-availability configuration is NONE.");
 
-	@Override
-	public void addRunOptions(Options baseOptions) {
-	}
+    @Override
+    public boolean isActive(CommandLine commandLine) {
+        // always active because we can try to read a JobManager address from the config
+        return true;
+    }
 
-	@Override
-	public void addGeneralOptions(Options baseOptions) {
-	}
+    @Override
+    public Configuration toConfiguration(CommandLine commandLine) throws FlinkException {
 
-	@Override
-	public StandaloneClusterClient retrieveCluster(CommandLine commandLine, Configuration config) {
+        final Configuration resultingConfiguration = super.toConfiguration(commandLine);
+        if (commandLine.hasOption(addressOption.getOpt())) {
+            String addressWithPort = commandLine.getOptionValue(addressOption.getOpt());
+            InetSocketAddress jobManagerAddress = NetUtils.parseHostPortAddress(addressWithPort);
+            setJobManagerAddressInConfig(resultingConfiguration, jobManagerAddress);
 
-		if (commandLine.hasOption(CliFrontendParser.ADDRESS_OPTION.getOpt())) {
-			String addressWithPort = commandLine.getOptionValue(CliFrontendParser.ADDRESS_OPTION.getOpt());
-			InetSocketAddress jobManagerAddress = ClientUtils.parseHostPortAddress(addressWithPort);
-			setJobManagerAddressInConfig(config, jobManagerAddress);
-		}
+            URL url = NetUtils.getCorrectHostnamePort(addressWithPort);
+            resultingConfiguration.set(RestOptions.PATH, url.getPath());
+            resultingConfiguration.set(SecurityOptions.SSL_REST_ENABLED, isHttpsProtocol(url));
+        }
+        resultingConfiguration.set(DeploymentOptions.TARGET, RemoteExecutor.NAME);
 
-		if (commandLine.hasOption(CliFrontendParser.ZOOKEEPER_NAMESPACE_OPTION.getOpt())) {
-			String zkNamespace = commandLine.getOptionValue(CliFrontendParser.ZOOKEEPER_NAMESPACE_OPTION.getOpt());
-			config.setString(HighAvailabilityOptions.HA_CLUSTER_ID, zkNamespace);
-		}
+        DynamicPropertiesUtil.encodeDynamicProperties(commandLine, resultingConfiguration);
 
-		StandaloneClusterDescriptor descriptor = new StandaloneClusterDescriptor(config);
-		return descriptor.retrieve(null);
-	}
+        return resultingConfiguration;
+    }
 
-	@Override
-	public StandaloneClusterClient createCluster(
-			String applicationName,
-			CommandLine commandLine,
-			Configuration config,
-			List<URL> userJarFiles) throws UnsupportedOperationException {
+    private static boolean isHttpsProtocol(URL url) {
+        return url.getProtocol() != null && (url.getProtocol().equalsIgnoreCase("https"));
+    }
 
-		StandaloneClusterDescriptor descriptor = new StandaloneClusterDescriptor(config);
-		return descriptor.deploy();
-	}
+    @Override
+    public String getId() {
+        return ID;
+    }
+
+    @Override
+    public void addGeneralOptions(Options baseOptions) {
+        super.addGeneralOptions(baseOptions);
+        baseOptions.addOption(addressOption);
+        baseOptions.addOption(DynamicPropertiesUtil.DYNAMIC_PROPERTIES);
+    }
 }

@@ -19,114 +19,77 @@
 package org.apache.flink.configuration;
 
 import org.apache.flink.core.fs.FileSystem;
-import org.apache.flink.core.fs.Path;
-import org.apache.flink.core.testutils.CommonTestUtils;
-import org.junit.Test;
+import org.apache.flink.core.fs.UnsupportedFileSystemSchemeException;
+import org.apache.flink.core.fs.local.LocalFileSystem;
+
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.File;
-import java.io.FileNotFoundException;
-import java.io.IOException;
-import java.io.PrintWriter;
-import java.lang.reflect.Field;
 import java.net.URI;
-import java.net.URISyntaxException;
-import java.util.UUID;
 
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-public class FilesystemSchemeConfigTest {
+/** Tests for the configuration of the default file system scheme. */
+class FilesystemSchemeConfigTest {
 
-	@Test
-	public void testExplicitFilesystemScheme() {
-		testSettingFilesystemScheme(false, "fs.default-scheme: otherFS://localhost:1234/", true);
-	}
+    @TempDir private File tempFolder;
 
-	@Test
-	public void testSettingFilesystemSchemeInConfiguration() {
-		testSettingFilesystemScheme(false, "fs.default-scheme: file:///", false);
-	}
+    @AfterEach
+    void clearFsSettings() {
+        FileSystem.initialize(new Configuration());
+    }
 
-	@Test
-	public void testUsingDefaultFilesystemScheme() {
-		testSettingFilesystemScheme(true, "fs.default-scheme: file:///", false);
-	}
+    // ------------------------------------------------------------------------
 
-	private void testSettingFilesystemScheme(boolean useDefaultScheme,
-											String configFileScheme, boolean useExplicitScheme) {
-		final File tmpDir = getTmpDir();
-		final File confFile = new File(tmpDir, GlobalConfiguration.FLINK_CONF_FILENAME);
-		try {
-			confFile.createNewFile();
-		} catch (IOException e) {
-			throw new RuntimeException("Couldn't create file", e);
-		}
-		final File testFile = new File(tmpDir.getAbsolutePath() + File.separator + "testing.txt");
+    @Test
+    void testDefaultsToLocal() throws Exception {
+        URI justPath = new URI(File.createTempFile("junit", null, tempFolder).toURI().getPath());
+        assertThat(justPath.getScheme()).isNull();
 
-		try {
-			try {
-				final PrintWriter pw1 = new PrintWriter(confFile);
-				if(!useDefaultScheme) {
-					pw1.println(configFileScheme);
-				}
-				pw1.close();
+        FileSystem fs = FileSystem.get(justPath);
+        assertThat(fs.getUri().getScheme()).isEqualTo("file");
+    }
 
-				final PrintWriter pwTest = new PrintWriter(testFile);
-				pwTest.close();
+    @Test
+    void testExplicitlySetToLocal() throws Exception {
+        final Configuration conf = new Configuration();
+        conf.set(CoreOptions.DEFAULT_FILESYSTEM_SCHEME, LocalFileSystem.getLocalFsURI().toString());
+        FileSystem.initialize(conf);
 
-			} catch (FileNotFoundException e) {
-				fail(e.getMessage());
-			}
+        URI justPath = new URI(File.createTempFile("junit", null, tempFolder).toURI().getPath());
+        assertThat(justPath.getScheme()).isNull();
 
-			Configuration conf = GlobalConfiguration.loadConfiguration(tmpDir.getAbsolutePath());
+        FileSystem fs = FileSystem.get(justPath);
+        assertThat(fs.getUri().getScheme()).isEqualTo("file");
+    }
 
-			try {
-				FileSystem.setDefaultScheme(conf);
-				String noSchemePath = testFile.toURI().getPath(); // remove the scheme.
+    @Test
+    void testExplicitlySetToOther() throws Exception {
+        final Configuration conf = new Configuration();
+        conf.set(CoreOptions.DEFAULT_FILESYSTEM_SCHEME, "otherFS://localhost:1234/");
+        FileSystem.initialize(conf);
 
-				URI uri = new URI(noSchemePath);
-				// check if the scheme == null (so that we get the configuration one.
-				assertTrue(uri.getScheme() == null);
+        URI justPath = new URI(File.createTempFile("junit", null, tempFolder).toURI().getPath());
+        assertThat(justPath.getScheme()).isNull();
 
-				// get the filesystem with the default scheme as set in the confFile1
-				FileSystem fs = useExplicitScheme ? FileSystem.get(testFile.toURI()) : FileSystem.get(uri);
-				assertTrue(fs.exists(new Path(noSchemePath)));
+        assertThatThrownBy(() -> FileSystem.get(justPath))
+                .isInstanceOf(UnsupportedFileSystemSchemeException.class)
+                .hasMessageContaining("otherFS");
+    }
 
-			} catch (IOException e) {
-				fail(e.getMessage());
-			} catch (URISyntaxException e) {
-				e.printStackTrace();
-			}
-		} finally {
-			try {
-				// clear the default scheme set in the FileSystem class.
-				// we do it through reflection to avoid creating a publicly
-				// accessible method, which could also be wrongly used by users.
+    @Test
+    void testExplicitlyPathTakesPrecedence() throws Exception {
+        final Configuration conf = new Configuration();
+        conf.set(CoreOptions.DEFAULT_FILESYSTEM_SCHEME, "otherFS://localhost:1234/");
+        FileSystem.initialize(conf);
 
-				Field f = FileSystem.class.getDeclaredField("defaultScheme");
-				f.setAccessible(true);
-				f.set(null, null);
-			} catch (IllegalAccessException | NoSuchFieldException e) {
-				e.printStackTrace();
-				fail("Cannot reset default scheme: " + e.getMessage());
-			}
-			
-			confFile.delete();
-			testFile.delete();
-			tmpDir.delete();
-		}
-	}
+        URI pathAndScheme = File.createTempFile("junit", null, tempFolder).toURI();
+        assertThat(pathAndScheme.getScheme()).isNotNull();
 
-	private File getTmpDir() {
-		File tmpDir = new File(CommonTestUtils.getTempDir() + File.separator
-			+ UUID.randomUUID().toString() + File.separator);
-		
-		assertTrue(tmpDir.mkdirs());
-
-		return tmpDir;
-	}
-
-	private File createRandomFile(File path, String suffix) {
-		return new File(path.getAbsolutePath() + File.separator + UUID.randomUUID() + suffix);
-	}
+        FileSystem fs = FileSystem.get(pathAndScheme);
+        assertThat(fs.getUri().getScheme()).isEqualTo("file");
+    }
 }

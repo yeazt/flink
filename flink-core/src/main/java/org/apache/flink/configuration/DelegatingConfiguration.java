@@ -22,6 +22,8 @@ import org.apache.flink.core.memory.DataInputView;
 import org.apache.flink.core.memory.DataOutputView;
 import org.apache.flink.util.Preconditions;
 
+import javax.annotation.Nonnull;
+
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -29,322 +31,251 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
+
+import static org.apache.flink.configuration.FallbackKey.createDeprecatedKey;
 
 /**
  * A configuration that manages a subset of keys with a common prefix from a given configuration.
  */
 public final class DelegatingConfiguration extends Configuration {
 
-	private static final long serialVersionUID = 1L;
+    private static final long serialVersionUID = 1L;
 
-	private final Configuration backingConfig;		// the configuration actually storing the data
+    private final Configuration backingConfig; // the configuration actually storing the data
 
-	private String prefix;							// the prefix key by which keys for this config are marked
+    @Nonnull private String prefix; // the prefix key by which keys for this config are marked
 
-	// --------------------------------------------------------------------------------------------
+    // --------------------------------------------------------------------------------------------
 
-	/**
-	 * Default constructor for serialization. Creates an empty delegating configuration.
-	 */
-	public DelegatingConfiguration() {
-		this.backingConfig = new Configuration();
-		this.prefix = "";
-	}
+    /** Default constructor for serialization. Creates an empty delegating configuration. */
+    public DelegatingConfiguration() {
+        this(new Configuration(), "");
+    }
 
-	/**
-	 * Creates a new delegating configuration which stores its key/value pairs in the given
-	 * configuration using the specifies key prefix.
-	 *
-	 * @param backingConfig The configuration holding the actual config data.
-	 * @param prefix The prefix prepended to all config keys.
-	 */
-	public DelegatingConfiguration(Configuration backingConfig, String prefix) {
-		this.backingConfig = Preconditions.checkNotNull(backingConfig);
-		this.prefix = prefix;
-	}
+    /**
+     * Creates a new delegating configuration which stores its key/value pairs in the given
+     * configuration using the specifies key prefix.
+     *
+     * @param backingConfig The configuration holding the actual config data.
+     * @param prefix The prefix prepended to all config keys.
+     */
+    public DelegatingConfiguration(Configuration backingConfig, String prefix) {
+        this.backingConfig = Preconditions.checkNotNull(backingConfig);
+        this.prefix = Preconditions.checkNotNull(prefix, "The 'prefix' attribute mustn't be null.");
+    }
 
-	// --------------------------------------------------------------------------------------------
+    // --------------------------------------------------------------------------------------------
 
-	@Override
-	public String getString(String key, String defaultValue) {
-		return this.backingConfig.getString(this.prefix + key, defaultValue);
-	}
+    @Override
+    public String getString(String key, String defaultValue) {
+        return this.backingConfig.getString(this.prefix + key, defaultValue);
+    }
 
-	@Override
-	public String getString(ConfigOption<String> configOption) {
-		return  this.backingConfig.getString(prefixOption(configOption, prefix));
-	}
+    @Override
+    public void setString(String key, String value) {
+        this.backingConfig.setString(this.prefix + key, value);
+    }
 
-	@Override
-	public String getString(ConfigOption<String> configOption, String overrideDefault) {
-		return  this.backingConfig.getString(prefixOption(configOption, prefix), overrideDefault);
-	}
+    @Override
+    public byte[] getBytes(final String key, final byte[] defaultValue) {
+        return this.backingConfig.getBytes(this.prefix + key, defaultValue);
+    }
 
-	@Override
-	public void setString(String key, String value) {
-		this.backingConfig.setString(this.prefix + key, value);
-	}
+    @Override
+    public void setBytes(final String key, final byte[] bytes) {
+        this.backingConfig.setBytes(this.prefix + key, bytes);
+    }
 
-	@Override
-	public void setString(ConfigOption<String> key, String value) {
-		this.backingConfig.setString(prefix + key.key(), value);
-	}
+    @Override
+    public String getValue(ConfigOption<?> configOption) {
+        return this.backingConfig.getValue(prefixOption(configOption, prefix));
+    }
 
-	@Override
-	public <T> Class<T> getClass(String key, Class<? extends T> defaultValue, ClassLoader classLoader) throws ClassNotFoundException {
-		return this.backingConfig.getClass(this.prefix + key, defaultValue, classLoader);
-	}
+    @Override
+    public <T extends Enum<T>> T getEnum(
+            final Class<T> enumClass, final ConfigOption<String> configOption) {
+        return this.backingConfig.getEnum(enumClass, prefixOption(configOption, prefix));
+    }
 
-	@Override
-	public void setClass(String key, Class<?> klazz) {
-		this.backingConfig.setClass(this.prefix + key, klazz);
-	}
+    @Override
+    public void addAllToProperties(Properties props) {
+        // only add keys with our prefix
+        synchronized (backingConfig.confData) {
+            for (Map.Entry<String, Object> entry : backingConfig.confData.entrySet()) {
+                if (entry.getKey().startsWith(prefix)) {
+                    String keyWithoutPrefix =
+                            entry.getKey().substring(prefix.length(), entry.getKey().length());
 
-	@Override
-	public int getInteger(String key, int defaultValue) {
-		return this.backingConfig.getInteger(this.prefix + key, defaultValue);
-	}
+                    props.put(keyWithoutPrefix, entry.getValue());
+                } else {
+                    // don't add stuff that doesn't have our prefix
+                }
+            }
+        }
+    }
 
-	@Override
-	public int getInteger(ConfigOption<Integer> configOption) {
-		return  this.backingConfig.getInteger(prefixOption(configOption, prefix));
-	}
+    @Override
+    public void addAll(Configuration other) {
+        this.addAll(other, "");
+    }
 
-	@Override
-	public void setInteger(String key, int value) {
-		this.backingConfig.setInteger(this.prefix + key, value);
-	}
+    @Override
+    public void addAll(Configuration other, String prefix) {
+        this.backingConfig.addAll(other, this.prefix + prefix);
+    }
 
-	@Override
-	public void setInteger(ConfigOption<Integer> key, int value) {
-		this.backingConfig.setInteger(prefix + key.key(), value);
-	}
+    @Override
+    public String toString() {
+        return backingConfig.toString();
+    }
 
-	@Override
-	public long getLong(String key, long defaultValue) {
-		return this.backingConfig.getLong(this.prefix + key, defaultValue);
-	}
+    @Override
+    public Set<String> keySet() {
+        if (this.prefix.isEmpty()) {
+            return this.backingConfig.keySet();
+        }
 
-	@Override
-	public long getLong(ConfigOption<Long> configOption) {
-		return  this.backingConfig.getLong(prefixOption(configOption, prefix));
-	}
+        final HashSet<String> set = new HashSet<>();
+        int prefixLen = this.prefix.length();
 
-	@Override
-	public void setLong(String key, long value) {
-		this.backingConfig.setLong(this.prefix + key, value);
-	}
+        for (String key : this.backingConfig.keySet()) {
+            if (key.startsWith(prefix)) {
+                set.add(key.substring(prefixLen));
+            }
+        }
 
-	@Override
-	public void setLong(ConfigOption<Long> key, long value) {
-		this.backingConfig.setLong(prefix + key.key(), value);
-	}
+        return set;
+    }
 
-	@Override
-	public boolean getBoolean(String key, boolean defaultValue) {
-		return this.backingConfig.getBoolean(this.prefix + key, defaultValue);
-	}
+    @Override
+    public Configuration clone() {
+        return new DelegatingConfiguration(backingConfig.clone(), prefix);
+    }
 
-	@Override
-	public boolean getBoolean(ConfigOption<Boolean> configOption) {
-		return  this.backingConfig.getBoolean(prefixOption(configOption, prefix));
-	}
+    @Override
+    public Map<String, String> toMap() {
+        Map<String, String> map = backingConfig.toMap();
+        Map<String, String> prefixed = new HashMap<>();
+        for (Map.Entry<String, String> entry : map.entrySet()) {
+            if (entry.getKey().startsWith(prefix)) {
+                String keyWithoutPrefix = entry.getKey().substring(prefix.length());
+                prefixed.put(keyWithoutPrefix, entry.getValue());
+            }
+        }
+        return prefixed;
+    }
 
-	@Override
-	public void setBoolean(String key, boolean value) {
-		this.backingConfig.setBoolean(this.prefix + key, value);
-	}
+    @Override
+    public Map<String, String> toFileWritableMap() {
+        Map<String, String> map = backingConfig.toFileWritableMap();
+        Map<String, String> prefixed = new HashMap<>();
+        for (Map.Entry<String, String> entry : map.entrySet()) {
+            if (entry.getKey().startsWith(prefix)) {
+                String keyWithoutPrefix = entry.getKey().substring(prefix.length());
+                prefixed.put(keyWithoutPrefix, YamlParserUtils.toYAMLString(entry.getValue()));
+            }
+        }
+        return prefixed;
+    }
 
-	@Override
-	public void setBoolean(ConfigOption<Boolean> key, boolean value) {
-		this.backingConfig.setBoolean(prefix + key.key(), value);
-	}
+    @Override
+    public <T> boolean removeConfig(ConfigOption<T> configOption) {
+        return backingConfig.removeConfig(prefixOption(configOption, prefix));
+    }
 
-	@Override
-	public float getFloat(String key, float defaultValue) {
-		return this.backingConfig.getFloat(this.prefix + key, defaultValue);
-	}
+    @Override
+    public boolean removeKey(String key) {
+        return backingConfig.removeKey(prefix + key);
+    }
 
-	@Override
-	public float getFloat(ConfigOption<Float> configOption) {
-		return this.backingConfig.getFloat(prefixOption(configOption, prefix));
-	}
+    @Override
+    public boolean containsKey(String key) {
+        return backingConfig.containsKey(prefix + key);
+    }
 
-	@Override
-	public void setFloat(String key, float value) {
-		this.backingConfig.setFloat(this.prefix + key, value);
-	}
+    @Override
+    public boolean contains(ConfigOption<?> configOption) {
+        return backingConfig.contains(prefixOption(configOption, prefix));
+    }
 
-	@Override
-	public void setFloat(ConfigOption<Float> key, float value) {
-		this.backingConfig.setFloat(prefix + key.key(), value);
-	}
+    @Override
+    public <T> T get(ConfigOption<T> option) {
+        return backingConfig.get(prefixOption(option, prefix));
+    }
 
-	@Override
-	public double getDouble(String key, double defaultValue) {
-		return this.backingConfig.getDouble(this.prefix + key, defaultValue);
-	}
+    @Override
+    public <T> T get(ConfigOption<T> configOption, T overrideDefault) {
+        return backingConfig.get(prefixOption(configOption, prefix), overrideDefault);
+    }
 
-	@Override
-	public double getDouble(ConfigOption<Double> configOption) {
-		return this.backingConfig.getDouble(prefixOption(configOption, prefix));
-	}
+    @Override
+    public <T> Optional<T> getOptional(ConfigOption<T> option) {
+        return backingConfig.getOptional(prefixOption(option, prefix));
+    }
 
-	@Override
-	public void setDouble(String key, double value) {
-		this.backingConfig.setDouble(this.prefix + key, value);
-	}
+    @Override
+    public <T> Configuration set(ConfigOption<T> option, T value) {
+        backingConfig.set(prefixOption(option, prefix), value);
+        return this;
+    }
 
-	@Override
-	public void setDouble(ConfigOption<Double> key, double value) {
-		this.backingConfig.setDouble(prefix + key.key(), value);
-	}
+    // --------------------------------------------------------------------------------------------
 
-	@Override
-	public byte[] getBytes(final String key, final byte[] defaultValue) {
-		return this.backingConfig.getBytes(this.prefix + key, defaultValue);
-	}
+    @Override
+    public void read(DataInputView in) throws IOException {
+        this.prefix = Preconditions.checkNotNull(in.readUTF());
+        this.backingConfig.read(in);
+    }
 
-	@Override
-	public void setBytes(final String key, final byte[] bytes) {
-		this.backingConfig.setBytes(this.prefix + key, bytes);
-	}
+    @Override
+    public void write(DataOutputView out) throws IOException {
+        out.writeUTF(this.prefix);
+        this.backingConfig.write(out);
+    }
 
-	@Override
-	public String getValue(ConfigOption<?> configOption) {
-		return this.backingConfig.getValue(prefixOption(configOption, prefix));
-	}
+    // --------------------------------------------------------------------------------------------
 
-	@Override
-	public void addAllToProperties(Properties props) {
-		// only add keys with our prefix
-		synchronized (backingConfig.confData) {
-			for (Map.Entry<String, Object> entry : backingConfig.confData.entrySet()) {
-				if (entry.getKey().startsWith(prefix)) {
-					String keyWithoutPrefix =
-							entry.getKey().substring(prefix.length(),
-									entry.getKey().length());
+    @Override
+    public int hashCode() {
+        return this.prefix.hashCode() ^ this.backingConfig.hashCode();
+    }
 
-					props.put(keyWithoutPrefix, entry.getValue());
-				} else {
-					// don't add stuff that doesn't have our prefix
-				}
-			}
-		}
+    @Override
+    public boolean equals(Object obj) {
+        if (obj instanceof DelegatingConfiguration) {
+            DelegatingConfiguration other = (DelegatingConfiguration) obj;
+            return this.prefix.equals(other.prefix)
+                    && this.backingConfig.equals(other.backingConfig);
+        } else {
+            return false;
+        }
+    }
 
-	}
+    // --------------------------------------------------------------------------------------------
 
-	@Override
-	public void addAll(Configuration other) {
-		this.addAll(other, "");
-	}
+    private static <T> ConfigOption<T> prefixOption(ConfigOption<T> option, String prefix) {
+        String key = prefix + option.key();
 
-	@Override
-	public void addAll(Configuration other, String prefix) {
-		this.backingConfig.addAll(other, this.prefix + prefix);
-	}
+        List<FallbackKey> deprecatedKeys;
+        if (option.hasFallbackKeys()) {
+            deprecatedKeys = new ArrayList<>();
+            for (FallbackKey dk : option.fallbackKeys()) {
+                deprecatedKeys.add(createDeprecatedKey(prefix + dk.getKey()));
+            }
+        } else {
+            deprecatedKeys = Collections.emptyList();
+        }
 
-	@Override
-	public String toString() {
-		return backingConfig.toString();
-	}
-
-	@Override
-	public Set<String> keySet() {
-		if (this.prefix == null) {
-			return this.backingConfig.keySet();
-		}
-
-		final HashSet<String> set = new HashSet<String>();
-		int prefixLen = this.prefix.length();
-
-		for (String key : this.backingConfig.keySet()) {
-			if (key.startsWith(prefix)) {
-				set.add(key.substring(prefixLen));
-			}
-		}
-
-		return set;
-	}
-
-	@Override
-	public Configuration clone() {
-		return new DelegatingConfiguration(backingConfig.clone(), prefix);
-	}
-
-	@Override
-	public Map<String, String> toMap() {
-		Map<String, String> map = backingConfig.toMap();
-		Map<String, String> prefixed = new HashMap<>(map.size());
-		for (Map.Entry<String, String> entry : map.entrySet()) {
-			prefixed.put(prefix + entry.getKey(), entry.getValue());
-		}
-
-		return prefixed; 
-	}
-
-	@Override
-	public boolean containsKey(String key) {
-		return backingConfig.containsKey(prefix + key);
-	}
-
-	@Override
-	public boolean contains(ConfigOption<?> configOption) {
-		return backingConfig.contains(prefixOption(configOption, prefix));
-	}
-
-	// --------------------------------------------------------------------------------------------
-
-	@Override
-	public void read(DataInputView in) throws IOException {
-		this.prefix = in.readUTF();
-		this.backingConfig.read(in);
-	}
-
-	@Override
-	public void write(DataOutputView out) throws IOException {
-		out.writeUTF(this.prefix);
-		this.backingConfig.write(out);
-	}
-
-	// --------------------------------------------------------------------------------------------
-
-	@Override
-	public int hashCode() {
-		return this.prefix.hashCode() ^ this.backingConfig.hashCode();
-	}
-
-	@Override
-	public boolean equals(Object obj) {
-		if (obj instanceof DelegatingConfiguration) {
-			DelegatingConfiguration other = (DelegatingConfiguration) obj;
-			return this.prefix.equals(other.prefix) && this.backingConfig.equals(other.backingConfig);
-		} else {
-			return false;
-		}
-	}
-
-	// --------------------------------------------------------------------------------------------
-
-	private static <T> ConfigOption<T> prefixOption(ConfigOption<T> option, String prefix) {
-		String key = prefix + option.key();
-
-		List<String> deprecatedKeys;
-		if (option.hasDeprecatedKeys()) {
-			deprecatedKeys = new ArrayList<>();
-			for (String dk : option.deprecatedKeys()) {
-				deprecatedKeys.add(prefix + dk);
-			}
-		} else {
-			deprecatedKeys = Collections.emptyList();
-		}
-
-		String[] deprecated = deprecatedKeys.toArray(new String[deprecatedKeys.size()]);
-		return new ConfigOption<T>(key,
-			option.description(),
-			option.defaultValue(),
-			deprecated);
-	}
+        FallbackKey[] deprecated = deprecatedKeys.toArray(new FallbackKey[0]);
+        return new ConfigOption<T>(
+                key,
+                option.getClazz(),
+                option.description(),
+                option.defaultValue(),
+                option.isList(),
+                deprecated);
+    }
 }

@@ -19,109 +19,105 @@
 package org.apache.flink.test.cancelling;
 
 import org.apache.flink.api.common.functions.MapFunction;
+import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.common.functions.RichMapFunction;
-import org.apache.flink.api.java.ExecutionEnvironment;
-import org.apache.flink.api.java.io.DiscardingOutputFormat;
-import org.apache.flink.configuration.Configuration;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.sink.v2.DiscardingSink;
 import org.apache.flink.test.util.InfiniteIntegerInputFormat;
-import org.junit.Test;
 
-public class MapCancelingITCase extends CancelingTestBase {
-	private static final int parallelism = 4;
+import org.junit.jupiter.api.Test;
 
-	public MapCancelingITCase() {
-		setTaskManagerNumSlots(parallelism);
-	}
-	
-	@Test
-	public void testMapCancelling() throws Exception {
-		executeTask(new IdentityMapper<Integer>());
-	}
-	
-	@Test
-	public void testSlowMapCancelling() throws Exception {
-		executeTask(new DelayingIdentityMapper<Integer>());
-	}
-	
-	@Test
-	public void testMapWithLongCancellingResponse() throws Exception {
-		executeTask(new LongCancelTimeIdentityMapper<Integer>());
-	}
-	
-	@Test
-	public void testMapPriorToFirstRecordReading() throws Exception {
-		executeTask(new StuckInOpenIdentityMapper<Integer>());
-	}
+/** Test job cancellation from within a MapFunction. */
+class MapCancelingITCase extends CancelingTestBase {
 
-	public void executeTask(MapFunction<Integer, Integer> mapper) throws Exception {
-		ExecutionEnvironment env = ExecutionEnvironment.getExecutionEnvironment();
+    @Test
+    void testMapCancelling() throws Exception {
+        executeTask(new IdentityMapper<Integer>());
+    }
 
-		env
-				.createInput(new InfiniteIntegerInputFormat(false))
-				.map(mapper)
-				.output(new DiscardingOutputFormat<Integer>());
+    @Test
+    void testSlowMapCancelling() throws Exception {
+        executeTask(new DelayingIdentityMapper<Integer>());
+    }
 
-		env.setParallelism(parallelism);
+    @Test
+    void testMapWithLongCancellingResponse() throws Exception {
+        executeTask(new LongCancelTimeIdentityMapper<Integer>());
+    }
 
-		runAndCancelJob(env.createProgramPlan(), 5 * 1000, 10 * 1000);
-	}
+    @Test
+    void testMapPriorToFirstRecordReading() throws Exception {
+        executeTask(new StuckInOpenIdentityMapper<Integer>());
+    }
 
-	// --------------------------------------------------------------------------------------------
-	
-	public static final class IdentityMapper<IN> implements MapFunction<IN, IN> {
-		private static final long serialVersionUID = 1L;
+    public void executeTask(MapFunction<Integer, Integer> mapper) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
 
-		@Override
-		public IN map(IN value) throws Exception {
-			return value;
-		}
-	}
-	
-	public static final class DelayingIdentityMapper<IN> implements MapFunction<IN, IN> {
-		private static final long serialVersionUID = 1L;
+        env.createInput(new InfiniteIntegerInputFormat(false))
+                .map(mapper)
+                .sinkTo(new DiscardingSink<>());
 
-		private static final int WAIT_TIME_PER_VALUE = 10 * 1000; // 10 sec.
+        env.setParallelism(PARALLELISM);
 
-		@Override
-		public IN map(IN value) throws Exception {
-			Thread.sleep(WAIT_TIME_PER_VALUE);
-			return value;
-		}
-	}
-	
-	public static final class LongCancelTimeIdentityMapper<IN> implements MapFunction<IN, IN> {
-		private static final long serialVersionUID = 1L;
+        runAndCancelJob(env.getStreamGraph().getJobGraph(), 5 * 1000, 10 * 1000);
+    }
 
-		private static final int WAIT_TIME_PER_VALUE = 5 * 1000; // 5 sec.
+    // --------------------------------------------------------------------------------------------
 
-		@Override
-		public IN map(IN value) throws Exception {
-			final long start = System.currentTimeMillis();
-			long remaining = WAIT_TIME_PER_VALUE;
-			do {
-				try {
-					Thread.sleep(remaining);
-				} catch (InterruptedException iex) {
-				}
-			} while ((remaining = WAIT_TIME_PER_VALUE - System.currentTimeMillis() + start) > 0);
+    private static final class IdentityMapper<IN> implements MapFunction<IN, IN> {
+        private static final long serialVersionUID = 1L;
 
-			return value;
-		}
-	}
-	
-	public static final class StuckInOpenIdentityMapper<IN> extends RichMapFunction<IN, IN> {
-		private static final long serialVersionUID = 1L;
+        @Override
+        public IN map(IN value) throws Exception {
+            return value;
+        }
+    }
 
-		@Override
-		public void open(Configuration parameters) throws Exception {
-			synchronized (this) {
-				wait();
-			}
-		}
+    private static final class DelayingIdentityMapper<IN> implements MapFunction<IN, IN> {
+        private static final long serialVersionUID = 1L;
 
-		@Override
-		public IN map(IN value) throws Exception {
-			return value;
-		}
-	}
+        private static final int WAIT_TIME_PER_VALUE = 10 * 1000; // 10 sec.
+
+        @Override
+        public IN map(IN value) throws Exception {
+            Thread.sleep(WAIT_TIME_PER_VALUE);
+            return value;
+        }
+    }
+
+    private static final class LongCancelTimeIdentityMapper<IN> implements MapFunction<IN, IN> {
+        private static final long serialVersionUID = 1L;
+
+        private static final int WAIT_TIME_PER_VALUE = 5 * 1000; // 5 sec.
+
+        @Override
+        public IN map(IN value) throws Exception {
+            final long start = System.currentTimeMillis();
+            long remaining = WAIT_TIME_PER_VALUE;
+            do {
+                try {
+                    Thread.sleep(remaining);
+                } catch (InterruptedException iex) {
+                }
+            } while ((remaining = WAIT_TIME_PER_VALUE - System.currentTimeMillis() + start) > 0);
+
+            return value;
+        }
+    }
+
+    private static final class StuckInOpenIdentityMapper<IN> extends RichMapFunction<IN, IN> {
+        private static final long serialVersionUID = 1L;
+
+        @Override
+        public void open(OpenContext openContext) throws Exception {
+            synchronized (this) {
+                wait();
+            }
+        }
+
+        @Override
+        public IN map(IN value) throws Exception {
+            return value;
+        }
+    }
 }

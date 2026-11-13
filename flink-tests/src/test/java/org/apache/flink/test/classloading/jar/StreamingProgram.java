@@ -18,81 +18,81 @@
 
 package org.apache.flink.test.classloading.jar;
 
-import java.util.StringTokenizer;
-
 import org.apache.flink.api.common.functions.FlatMapFunction;
+import org.apache.flink.api.common.typeinfo.Types;
+import org.apache.flink.api.java.tuple.Tuple;
+import org.apache.flink.api.java.tuple.Tuple1;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.api.functions.sink.SinkFunction;
+import org.apache.flink.streaming.api.functions.sink.v2.DiscardingSink;
 import org.apache.flink.test.testdata.WordCountData;
 import org.apache.flink.util.Collector;
 
+import java.util.StringTokenizer;
+
+/** Test class used by the {@link org.apache.flink.test.classloading.ClassLoaderITCase}. */
 @SuppressWarnings("serial")
 public class StreamingProgram {
-	
-	public static void main(String[] args) throws Exception {
-		StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-		env.getConfig().disableSysoutLogging();
-		
-		DataStream<String> text = env.fromElements(WordCountData.TEXT).rebalance();
 
-		DataStream<Word> counts =
-				text.flatMap(new Tokenizer()).keyBy("word").sum("frequency");
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
 
-		counts.addSink(new NoOpSink());
+        DataStream<String> text = env.fromData(WordCountData.TEXT).rebalance();
 
-		env.execute();
-	}
-	// --------------------------------------------------------------------------------------------
+        DataStream<Word> counts =
+                text.flatMap(new Tokenizer())
+                        .keyBy(x -> (Tuple) Tuple1.of(x.word), Types.TUPLE(Types.STRING))
+                        .sum("frequency");
 
-	public static class Word {
+        counts.sinkTo(new DiscardingSink<>());
 
-		private String word;
-		private Integer frequency;
+        env.execute();
+    }
 
-		public Word() {
-		}
+    // --------------------------------------------------------------------------------------------
 
-		public Word(String word, int i) {
-			this.word = word;
-			this.frequency = i;
-		}
+    /** POJO with word and count. */
+    public static class Word {
 
-		public String getWord() {
-			return word;
-		}
+        private String word;
+        private Integer frequency;
 
-		public void setWord(String word) {
-			this.word = word;
-		}
+        public Word() {}
 
-		public Integer getFrequency() {
-			return frequency;
-		}
+        public Word(String word, int i) {
+            this.word = word;
+            this.frequency = i;
+        }
 
-		public void setFrequency(Integer frequency) {
-			this.frequency = frequency;
-		}
+        public String getWord() {
+            return word;
+        }
 
-		@Override
-		public String toString() {
-			return "(" + word + ", " + frequency + ")";
-		}
-	}
+        public void setWord(String word) {
+            this.word = word;
+        }
 
-	public static class Tokenizer implements FlatMapFunction<String, Word>{
-		@Override
-		public void flatMap(String value, Collector<Word> out) throws Exception {
-			StringTokenizer tokenizer = new StringTokenizer(value);
-			while (tokenizer.hasMoreTokens()){
-				out.collect(new Word(tokenizer.nextToken(), 1));
-			}
-		}
-	}
+        public Integer getFrequency() {
+            return frequency;
+        }
 
-	public static class NoOpSink implements SinkFunction<Word>{
-		@Override
-		public void invoke(Word value) throws Exception {
-		}
-	}
+        public void setFrequency(Integer frequency) {
+            this.frequency = frequency;
+        }
+
+        @Override
+        public String toString() {
+            return "(" + word + ", " + frequency + ")";
+        }
+    }
+
+    private static class Tokenizer implements FlatMapFunction<String, Word> {
+        @Override
+        public void flatMap(String value, Collector<Word> out) throws Exception {
+            StringTokenizer tokenizer = new StringTokenizer(value);
+            while (tokenizer.hasMoreTokens()) {
+                out.collect(new Word(tokenizer.nextToken(), 1));
+            }
+        }
+    }
 }

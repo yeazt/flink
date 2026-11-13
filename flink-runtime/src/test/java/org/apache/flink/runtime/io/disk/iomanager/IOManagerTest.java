@@ -21,114 +21,112 @@ package org.apache.flink.runtime.io.disk.iomanager;
 import org.apache.flink.core.memory.MemorySegment;
 import org.apache.flink.runtime.io.disk.iomanager.FileIOChannel.ID;
 import org.apache.flink.runtime.io.network.buffer.Buffer;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.TemporaryFolder;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.File;
-import java.io.IOException;
+import java.nio.file.Files;
 import java.util.List;
+import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 
-public class IOManagerTest {
+class IOManagerTest {
 
-	@Rule
-	public final TemporaryFolder  temporaryFolder = new TemporaryFolder();
+    @Test
+    void channelEnumerator(@TempDir File tempPath) throws Exception {
+        String[] tempDirs =
+                new String[] {
+                    new File(tempPath, "a").getAbsolutePath(),
+                    new File(tempPath, "b").getAbsolutePath(),
+                    new File(tempPath, "c").getAbsolutePath(),
+                    new File(tempPath, "d").getAbsolutePath(),
+                    new File(tempPath, "e").getAbsolutePath(),
+                };
 
-	@Test
-	public void channelEnumerator() throws IOException {
-		IOManager ioMan = null;
+        int[] counters = new int[tempDirs.length];
+        try (IOManager ioMan = new TestIOManager(tempDirs)) {
+            FileIOChannel.Enumerator enumerator = ioMan.createChannelEnumerator();
 
-		try {
-			File tempPath = temporaryFolder.newFolder();
+            for (int i = 0; i < 3 * tempDirs.length; i++) {
+                FileIOChannel.ID id = enumerator.next();
 
-			String[] tempDirs = new String[]{
-					new File(tempPath, "a").getAbsolutePath(),
-					new File(tempPath, "b").getAbsolutePath(),
-					new File(tempPath, "c").getAbsolutePath(),
-					new File(tempPath, "d").getAbsolutePath(),
-					new File(tempPath, "e").getAbsolutePath(),
-			};
+                File pathFile = id.getPathFile();
+                Files.createFile(pathFile.toPath());
 
-			int[] counters = new int[tempDirs.length];
+                assertThat(pathFile)
+                        .withFailMessage("Channel IDs must name an absolute path.")
+                        .isAbsolute();
+                assertThat(pathFile)
+                        .withFailMessage("Channel IDs must name a file, not a directory.")
+                        .isFile();
 
-			ioMan = new TestIOManager(tempDirs);
-			FileIOChannel.Enumerator enumerator = ioMan.createChannelEnumerator();
+                assertThat(pathFile.getParentFile().getParentFile().getParentFile())
+                        .withFailMessage("Path is not in the temp directory.")
+                        .isEqualTo(tempPath);
 
-			for (int i = 0; i < 3 * tempDirs.length; i++) {
-				FileIOChannel.ID id = enumerator.next();
+                for (int k = 0; k < tempDirs.length; k++) {
+                    if (pathFile.getParentFile().getParent().equals(tempDirs[k])) {
+                        counters[k]++;
+                    }
+                }
+            }
 
-				File path = id.getPathFile();
+            for (int k = 0; k < tempDirs.length; k++) {
+                assertThat(counters[k]).isEqualTo(3);
+            }
+        }
+    }
 
-				assertTrue("Channel IDs must name an absolute path.", path.isAbsolute());
-				assertFalse("Channel IDs must name a file, not a directory.", path.isDirectory());
+    // --------------------------------------------------------------------------------------------
 
-				assertTrue("Path is not in the temp directory.",
-						tempPath.equals(path.getParentFile().getParentFile().getParentFile()));
+    private static class TestIOManager extends IOManager {
 
-				for (int k = 0; k < tempDirs.length; k++) {
-					if (path.getParentFile().getParent().equals(tempDirs[k])) {
-						counters[k]++;
-					}
-				}
-			}
+        protected TestIOManager(String[] paths) {
+            super(paths, Executors.newSingleThreadScheduledExecutor());
+        }
 
-			for (int k = 0; k < tempDirs.length; k++) {
-				assertEquals(3, counters[k]);
-			}
-		}
-		finally {
-			if (ioMan != null) {
-				ioMan.shutdown();
-			}
-		}
-	}
-	
-	// --------------------------------------------------------------------------------------------
-	
-	private static class TestIOManager extends IOManager {
+        @Override
+        public BlockChannelWriter<MemorySegment> createBlockChannelWriter(
+                ID channelID, LinkedBlockingQueue<MemorySegment> returnQueue) {
+            throw new UnsupportedOperationException();
+        }
 
-		protected TestIOManager(String[] paths) {
-			super(paths);
-		}
+        @Override
+        public BlockChannelWriterWithCallback<MemorySegment> createBlockChannelWriter(
+                ID channelID, RequestDoneCallback<MemorySegment> callback) {
+            throw new UnsupportedOperationException();
+        }
 
-		@Override
-		public BlockChannelWriter<MemorySegment> createBlockChannelWriter(ID channelID, LinkedBlockingQueue<MemorySegment> returnQueue) {
-			throw new UnsupportedOperationException();
-		}
+        @Override
+        public BlockChannelReader<MemorySegment> createBlockChannelReader(
+                ID channelID, LinkedBlockingQueue<MemorySegment> returnQueue) {
+            throw new UnsupportedOperationException();
+        }
 
-		@Override
-		public BlockChannelWriterWithCallback<MemorySegment> createBlockChannelWriter(ID channelID, RequestDoneCallback<MemorySegment> callback) {
-			throw new UnsupportedOperationException();
-		}
+        @Override
+        public BufferFileWriter createBufferFileWriter(ID channelID) {
+            throw new UnsupportedOperationException();
+        }
 
-		@Override
-		public BlockChannelReader<MemorySegment> createBlockChannelReader(ID channelID, LinkedBlockingQueue<MemorySegment> returnQueue) {
-			throw new UnsupportedOperationException();
-		}
+        @Override
+        public BufferFileReader createBufferFileReader(
+                ID channelID, RequestDoneCallback<Buffer> callback) {
+            throw new UnsupportedOperationException();
+        }
 
-		@Override
-		public BufferFileWriter createBufferFileWriter(ID channelID) throws IOException {
-			throw new UnsupportedOperationException();
-		}
+        @Override
+        public BufferFileSegmentReader createBufferFileSegmentReader(
+                ID channelID, RequestDoneCallback<FileSegment> callback) {
+            throw new UnsupportedOperationException();
+        }
 
-		@Override
-		public BufferFileReader createBufferFileReader(ID channelID, RequestDoneCallback<Buffer> callback) throws IOException {
-			throw new UnsupportedOperationException();
-		}
-
-		@Override
-		public BufferFileSegmentReader createBufferFileSegmentReader(ID channelID, RequestDoneCallback<FileSegment> callback) throws IOException {
-			throw new UnsupportedOperationException();
-		}
-
-		@Override
-		public BulkBlockChannelReader createBulkBlockChannelReader(ID channelID, List<MemorySegment> targetSegments, int numBlocks) {
-			throw new UnsupportedOperationException();
-		}
-	}
+        @Override
+        public BulkBlockChannelReader createBulkBlockChannelReader(
+                ID channelID, List<MemorySegment> targetSegments, int numBlocks) {
+            throw new UnsupportedOperationException();
+        }
+    }
 }

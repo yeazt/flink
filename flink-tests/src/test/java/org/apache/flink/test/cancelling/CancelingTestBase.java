@@ -16,160 +16,123 @@
  * limitations under the License.
  */
 
-
 package org.apache.flink.test.cancelling;
 
-import org.apache.flink.api.common.Plan;
-import org.apache.flink.configuration.AkkaOptions;
-import org.apache.flink.configuration.ConfigConstants;
+import org.apache.flink.api.common.JobID;
+import org.apache.flink.api.common.JobStatus;
+import org.apache.flink.client.program.ClusterClient;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.CoreOptions;
+import org.apache.flink.configuration.MemorySize;
+import org.apache.flink.configuration.RpcOptions;
 import org.apache.flink.configuration.TaskManagerOptions;
-import org.apache.flink.optimizer.DataStatistics;
-import org.apache.flink.optimizer.Optimizer;
-import org.apache.flink.optimizer.plan.OptimizedPlan;
-import org.apache.flink.optimizer.plantranslate.JobGraphGenerator;
-import org.apache.flink.runtime.instance.ActorGateway;
 import org.apache.flink.runtime.jobgraph.JobGraph;
-import org.apache.flink.runtime.jobgraph.JobStatus;
-import org.apache.flink.runtime.minicluster.LocalFlinkMiniCluster;
-import org.apache.flink.runtime.testingUtils.TestingUtils;
-import org.apache.flink.runtime.testutils.JobManagerActorTestUtils;
-import org.apache.flink.util.TestLogger;
-import org.apache.hadoop.fs.FileSystem;
-import org.junit.After;
-import org.junit.Assert;
-import org.junit.Before;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import scala.concurrent.Await;
-import scala.concurrent.Future;
-import scala.concurrent.duration.FiniteDuration;
+import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
+import org.apache.flink.test.junit5.InjectClusterClient;
+import org.apache.flink.test.junit5.MiniClusterExtension;
+import org.apache.flink.testutils.TestingUtils;
+import org.apache.flink.util.TestLoggerExtension;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.util.concurrent.TimeUnit;
 
-import static org.apache.flink.runtime.messages.JobManagerMessages.CancelJob;
-import static org.apache.flink.runtime.messages.JobManagerMessages.CancellationFailure;
-import static org.apache.flink.runtime.messages.JobManagerMessages.CancellationSuccess;
+import scala.concurrent.duration.Deadline;
+import scala.concurrent.duration.FiniteDuration;
 
-/**
- * 
- */
-public abstract class CancelingTestBase extends TestLogger {
-	
-	private static final Logger LOG = LoggerFactory.getLogger(CancelingTestBase.class);
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.fail;
 
-	private static final int MINIMUM_HEAP_SIZE_MB = 192;
-	
-	/**
-	 * Defines the number of seconds after which an issued cancel request is expected to have taken effect (i.e. the job
-	 * is canceled), starting from the point in time when the cancel request is issued.
-	 */
-	private static final int DEFAULT_CANCEL_FINISHED_INTERVAL = 10 * 1000;
+/** Base class for testing job cancellation. */
+@ExtendWith(TestLoggerExtension.class)
+abstract class CancelingTestBase {
 
-	private static final int DEFAULT_TASK_MANAGER_NUM_SLOTS = 1;
+    private static final int MINIMUM_HEAP_SIZE_MB = 192;
 
-	// --------------------------------------------------------------------------------------------
-	
-	protected LocalFlinkMiniCluster executor;
+    protected static final int PARALLELISM = 4;
 
-	protected int taskManagerNumSlots = DEFAULT_TASK_MANAGER_NUM_SLOTS;
-	
-	// --------------------------------------------------------------------------------------------
-	
-	private void verifyJvmOptions() {
-		final long heap = Runtime.getRuntime().maxMemory() >> 20;
-		Assert.assertTrue("Insufficient java heap space " + heap + "mb - set JVM option: -Xmx" + MINIMUM_HEAP_SIZE_MB
-				+ "m", heap > MINIMUM_HEAP_SIZE_MB - 50);
-	}
+    private static final Configuration configuration = getConfiguration();
 
-	@Before
-	public void startCluster() throws Exception {
-		verifyJvmOptions();
-		Configuration config = new Configuration();
-		config.setBoolean(ConfigConstants.FILESYSTEM_DEFAULT_OVERWRITE_KEY, true);
-		config.setInteger(ConfigConstants.LOCAL_NUMBER_TASK_MANAGER, 2);
-		config.setInteger(ConfigConstants.TASK_MANAGER_NUM_TASK_SLOTS, 4);
-		config.setString(AkkaOptions.ASK_TIMEOUT, TestingUtils.DEFAULT_AKKA_ASK_TIMEOUT());
-		config.setInteger(TaskManagerOptions.MEMORY_SEGMENT_SIZE, 4096);
-		config.setInteger(TaskManagerOptions.NETWORK_NUM_BUFFERS, 2048);
+    protected ClusterClient<?> clusterClient;
 
-		this.executor = new LocalFlinkMiniCluster(config, false);
-		this.executor.start();
-	}
+    // --------------------------------------------------------------------------------------------
 
-	@After
-	public void stopCluster() throws Exception {
-		if (this.executor != null) {
-			this.executor.stop();
-			this.executor = null;
-			FileSystem.closeAll();
-			System.gc();
-		}
-	}
+    @RegisterExtension
+    private static final MiniClusterExtension MINI_CLUSTER_EXTENSION =
+            new MiniClusterExtension(
+                    new MiniClusterResourceConfiguration.Builder()
+                            .setConfiguration(configuration)
+                            .setNumberTaskManagers(2)
+                            .setNumberSlotsPerTaskManager(4)
+                            .build());
 
-	// --------------------------------------------------------------------------------------------
+    @BeforeEach
+    void getClusterClient(@InjectClusterClient ClusterClient<?> clusterClient) {
+        this.clusterClient = clusterClient;
+    }
 
-	public void runAndCancelJob(Plan plan, int msecsTillCanceling) throws Exception {
-		runAndCancelJob(plan, msecsTillCanceling, DEFAULT_CANCEL_FINISHED_INTERVAL);
-	}
-		
-	public void runAndCancelJob(Plan plan, final int msecsTillCanceling, int maxTimeTillCanceled) throws Exception {
-		try {
-			// submit job
-			final JobGraph jobGraph = getJobGraph(plan);
+    // --------------------------------------------------------------------------------------------
 
-			executor.submitJobDetached(jobGraph);
+    private static void verifyJvmOptions() {
+        final long heap = Runtime.getRuntime().maxMemory() >> 20;
+        assertThat(heap)
+                .as(
+                        "Insufficient java heap space "
+                                + heap
+                                + "mb - set JVM option: -Xmx"
+                                + MINIMUM_HEAP_SIZE_MB
+                                + "m")
+                .isGreaterThan(MINIMUM_HEAP_SIZE_MB - 50);
+    }
 
-			// Wait for the job to make some progress and then cancel
-			JobManagerActorTestUtils.waitForJobStatus(jobGraph.getJobID(), JobStatus.RUNNING,
-					executor.getLeaderGateway(TestingUtils.TESTING_DURATION()),
-					TestingUtils.TESTING_DURATION());
+    private static Configuration getConfiguration() {
+        verifyJvmOptions();
+        Configuration config = new Configuration();
+        config.set(CoreOptions.FILESYTEM_DEFAULT_OVERRIDE, true);
+        config.set(RpcOptions.ASK_TIMEOUT_DURATION, TestingUtils.DEFAULT_ASK_TIMEOUT);
+        config.set(TaskManagerOptions.MEMORY_SEGMENT_SIZE, MemorySize.parse("4096"));
 
-			Thread.sleep(msecsTillCanceling);
+        return config;
+    }
 
-			FiniteDuration timeout = new FiniteDuration(maxTimeTillCanceled, TimeUnit.MILLISECONDS);
+    // --------------------------------------------------------------------------------------------
 
-			ActorGateway jobManager = executor.getLeaderGateway(TestingUtils.TESTING_DURATION());
+    protected void runAndCancelJob(
+            JobGraph jobGraph, final int msecsTillCanceling, int maxTimeTillCanceled)
+            throws Exception {
+        // submit job
+        final long rpcTimeout = configuration.get(RpcOptions.ASK_TIMEOUT_DURATION).toMillis();
 
-			Future<Object> ask = jobManager.ask(new CancelJob(jobGraph.getJobID()), timeout);
+        JobID jobID = clusterClient.submitJob(jobGraph).get();
 
-			Object result = Await.result(ask, timeout);
+        Deadline submissionDeadLine = new FiniteDuration(2, TimeUnit.MINUTES).fromNow();
 
-			if (result instanceof CancellationSuccess) {
-				// all good
-			} else if (result instanceof CancellationFailure) {
-				// Failure
-				CancellationFailure failure = (CancellationFailure) result;
-				throw new Exception("Failed to cancel job with ID " + failure.jobID() + ".",
-						failure.cause());
-			} else {
-				throw new Exception("Unexpected response to cancel request: " + result);
-			}
+        JobStatus jobStatus =
+                clusterClient.getJobStatus(jobID).get(rpcTimeout, TimeUnit.MILLISECONDS);
+        while (jobStatus != JobStatus.RUNNING && submissionDeadLine.hasTimeLeft()) {
+            Thread.sleep(50);
+            jobStatus = clusterClient.getJobStatus(jobID).get(rpcTimeout, TimeUnit.MILLISECONDS);
+        }
+        if (jobStatus != JobStatus.RUNNING) {
+            fail("Job not in state RUNNING.");
+        }
 
-			// Wait for the job to be cancelled
-			JobManagerActorTestUtils.waitForJobStatus(jobGraph.getJobID(), JobStatus.CANCELED,
-					executor.getLeaderGateway(TestingUtils.TESTING_DURATION()),
-					TestingUtils.TESTING_DURATION());
-		}
-		catch (Exception e) {
-			LOG.error("Exception found in runAndCancelJob.", e);
-			e.printStackTrace();
-			Assert.fail(e.getMessage());
-		}
-	}
+        Thread.sleep(msecsTillCanceling);
 
-	private JobGraph getJobGraph(final Plan plan) throws Exception {
-		final Optimizer pc = new Optimizer(new DataStatistics(), this.executor.configuration());
-		final OptimizedPlan op = pc.compile(plan);
-		final JobGraphGenerator jgg = new JobGraphGenerator();
-		return jgg.compileJobGraph(op);
-	}
+        clusterClient.cancel(jobID).get();
 
-	public void setTaskManagerNumSlots(int taskManagerNumSlots) {
-		this.taskManagerNumSlots = taskManagerNumSlots;
-	}
+        Deadline cancelDeadline =
+                new FiniteDuration(maxTimeTillCanceled, TimeUnit.MILLISECONDS).fromNow();
 
-	public int getTaskManagerNumSlots() {
-		return this.taskManagerNumSlots;
-	}
+        JobStatus jobStatusAfterCancel =
+                clusterClient.getJobStatus(jobID).get(rpcTimeout, TimeUnit.MILLISECONDS);
+        while (jobStatusAfterCancel != JobStatus.CANCELED && cancelDeadline.hasTimeLeft()) {
+            Thread.sleep(50);
+            jobStatusAfterCancel =
+                    clusterClient.getJobStatus(jobID).get(rpcTimeout, TimeUnit.MILLISECONDS);
+        }
+        assertThat(jobStatusAfterCancel).isEqualTo(JobStatus.CANCELED);
+    }
 }

@@ -18,549 +18,285 @@
 
 package org.apache.flink.runtime.executiongraph;
 
-import static org.apache.flink.runtime.executiongraph.ExecutionGraphTestUtils.*;
-import static org.junit.Assert.*;
-import static org.mockito.Mockito.mock;
+import org.apache.flink.api.common.JobStatus;
+import org.apache.flink.runtime.concurrent.NoMainThreadCheckComponentMainThreadExecutor;
+import org.apache.flink.runtime.execution.ExecutionState;
+import org.apache.flink.runtime.executiongraph.utils.ExecutionUtils;
+import org.apache.flink.runtime.executiongraph.utils.SimpleAckingTaskManagerGateway;
+import org.apache.flink.runtime.jobgraph.JobGraphTestUtils;
+import org.apache.flink.runtime.jobmaster.LogicalSlot;
+import org.apache.flink.runtime.jobmaster.TestingLogicalSlotBuilder;
+import org.apache.flink.runtime.messages.Acknowledge;
+import org.apache.flink.runtime.scheduler.SchedulerBase;
+import org.apache.flink.runtime.scheduler.SchedulerTestingUtils;
+import org.apache.flink.testutils.TestingUtils;
+import org.apache.flink.testutils.executor.TestExecutorExtension;
+import org.apache.flink.util.concurrent.FutureUtils;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.io.IOException;
+import java.time.Duration;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ScheduledExecutorService;
 
-import org.apache.flink.runtime.akka.AkkaUtils;
-import org.apache.flink.runtime.execution.ExecutionState;
-import org.apache.flink.runtime.instance.BaseTestingActorGateway;
-import org.apache.flink.runtime.instance.DummyActorGateway;
-import org.apache.flink.runtime.instance.ActorGateway;
-import org.apache.flink.runtime.instance.SimpleSlot;
-import org.apache.flink.runtime.instance.Instance;
-import org.apache.flink.api.common.JobID;
-import org.apache.flink.runtime.jobgraph.JobStatus;
-import org.apache.flink.runtime.jobgraph.JobVertexID;
-import org.apache.flink.runtime.jobmanager.scheduler.Scheduler;
-import org.apache.flink.runtime.jobmanager.slots.ActorTaskManagerGateway;
-import org.apache.flink.runtime.messages.Acknowledge;
-import org.apache.flink.runtime.messages.TaskMessages.SubmitTask;
-import org.apache.flink.runtime.messages.TaskMessages.CancelTask;
-import org.apache.flink.runtime.testingUtils.TestingUtils;
-import org.apache.flink.runtime.testutils.DirectScheduledExecutorService;
+import static org.apache.flink.runtime.executiongraph.ExecutionGraphTestUtils.createNoOpVertex;
+import static org.apache.flink.runtime.executiongraph.ExecutionGraphTestUtils.getExecutionVertex;
+import static org.apache.flink.runtime.executiongraph.ExecutionGraphTestUtils.setVertexResource;
+import static org.apache.flink.runtime.executiongraph.ExecutionGraphTestUtils.setVertexState;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.fail;
+
+/** Tests for cancelling {@link ExecutionVertex ExecutionVertices}. */
+class ExecutionVertexCancelTest {
+
+    @RegisterExtension
+    static final TestExecutorExtension<ScheduledExecutorService> EXECUTOR_RESOURCE =
+            TestingUtils.defaultExecutorExtension();
+
+    // --------------------------------------------------------------------------------------------
+    //  Canceling in different states
+    // --------------------------------------------------------------------------------------------
 
-import org.junit.Test;
+    @Test
+    void testCancelFromCreated() {
+        try {
+            final ExecutionVertex vertex = getExecutionVertex();
 
-import scala.concurrent.ExecutionContext;
+            assertThat(vertex.getExecutionState()).isEqualTo(ExecutionState.CREATED);
 
-@SuppressWarnings("serial")
-public class ExecutionVertexCancelTest {
+            vertex.cancel();
 
-	// --------------------------------------------------------------------------------------------
-	//  Canceling in different states
-	// --------------------------------------------------------------------------------------------
+            assertThat(vertex.getExecutionState()).isEqualTo(ExecutionState.CANCELED);
 
-	@Test
-	public void testCancelFromCreated() {
-		try {
-			final JobVertexID jid = new JobVertexID();
-			final ExecutionJobVertex ejv = getExecutionVertex(jid);
+            assertThat(vertex.getFailureInfo()).isNotPresent();
 
-			final ExecutionVertex vertex = new ExecutionVertex(ejv, 0, new IntermediateResult[0],
-					AkkaUtils.getDefaultTimeout());
+            assertThat(vertex.getStateTimestamp(ExecutionState.CREATED)).isGreaterThan(0);
+            assertThat(vertex.getStateTimestamp(ExecutionState.CANCELING)).isGreaterThan(0);
+            assertThat(vertex.getStateTimestamp(ExecutionState.CANCELED)).isGreaterThan(0);
+        } catch (Exception e) {
+            e.printStackTrace();
+            fail(e.getMessage());
+        }
+    }
 
-			assertEquals(ExecutionState.CREATED, vertex.getExecutionState());
+    @Test
+    void testCancelFromScheduled() {
+        try {
+            final ExecutionVertex vertex = getExecutionVertex();
 
-			vertex.cancel();
+            setVertexState(vertex, ExecutionState.SCHEDULED);
+            assertThat(vertex.getExecutionState()).isEqualTo(ExecutionState.SCHEDULED);
 
-			assertEquals(ExecutionState.CANCELED, vertex.getExecutionState());
+            vertex.cancel();
 
-			assertNull(vertex.getFailureCause());
+            assertThat(vertex.getExecutionState()).isEqualTo(ExecutionState.CANCELED);
 
-			assertTrue(vertex.getStateTimestamp(ExecutionState.CREATED) > 0);
-			assertTrue(vertex.getStateTimestamp(ExecutionState.CANCELING) > 0);
-			assertTrue(vertex.getStateTimestamp(ExecutionState.CANCELED) > 0);
-		}
-		catch (Exception e) {
-			e.printStackTrace();
-			fail(e.getMessage());
-		}
-	}
+            assertThat(vertex.getFailureInfo()).isNotPresent();
 
-	@Test
-	public void testCancelFromScheduled() {
-		try {
-			final JobVertexID jid = new JobVertexID();
-			final ExecutionJobVertex ejv = getExecutionVertex(jid);
+            assertThat(vertex.getStateTimestamp(ExecutionState.CREATED)).isGreaterThan(0);
+            assertThat(vertex.getStateTimestamp(ExecutionState.CANCELING)).isGreaterThan(0);
+            assertThat(vertex.getStateTimestamp(ExecutionState.CANCELED)).isGreaterThan(0);
+        } catch (Exception e) {
+            e.printStackTrace();
+            fail(e.getMessage());
+        }
+    }
 
-			final ExecutionVertex vertex = new ExecutionVertex(ejv, 0, new IntermediateResult[0],
-					AkkaUtils.getDefaultTimeout());
+    @Test
+    void testCancelFromRunning() {
+        try {
+            final ExecutionVertex vertex = getExecutionVertex();
 
-			setVertexState(vertex, ExecutionState.SCHEDULED);
-			assertEquals(ExecutionState.SCHEDULED, vertex.getExecutionState());
+            LogicalSlot slot =
+                    new TestingLogicalSlotBuilder()
+                            .setTaskManagerGateway(
+                                    new CancelSequenceSimpleAckingTaskManagerGateway(1))
+                            .createTestingLogicalSlot();
 
-			vertex.cancel();
+            setVertexResource(vertex, slot);
+            setVertexState(vertex, ExecutionState.RUNNING);
 
-			assertEquals(ExecutionState.CANCELED, vertex.getExecutionState());
+            assertThat(vertex.getExecutionState()).isEqualTo(ExecutionState.RUNNING);
 
-			assertNull(vertex.getFailureCause());
+            vertex.cancel();
+            vertex.getCurrentExecutionAttempt()
+                    .completeCancelling(); // response by task manager once actually canceled
 
-			assertTrue(vertex.getStateTimestamp(ExecutionState.CREATED) > 0);
-			assertTrue(vertex.getStateTimestamp(ExecutionState.CANCELING) > 0);
-			assertTrue(vertex.getStateTimestamp(ExecutionState.CANCELED) > 0);
-		}
-		catch (Exception e) {
-			e.printStackTrace();
-			fail(e.getMessage());
-		}
-	}
+            assertThat(vertex.getExecutionState()).isEqualTo(ExecutionState.CANCELED);
 
-	@Test
-	public void testCancelConcurrentlyToDeploying_CallsNotOvertaking() {
-		try {
-			final JobVertexID jid = new JobVertexID();
+            assertThat(slot.isAlive()).isFalse();
 
-			final TestingUtils.QueuedActionExecutionContext executionContext = TestingUtils.queuedActionExecutionContext();
-			final TestingUtils.ActionQueue actions = executionContext.actionQueue();
+            assertThat(vertex.getFailureInfo()).isNotPresent();
 
+            assertThat(vertex.getStateTimestamp(ExecutionState.CREATED)).isGreaterThan(0);
+            assertThat(vertex.getStateTimestamp(ExecutionState.CANCELING)).isGreaterThan(0);
+            assertThat(vertex.getStateTimestamp(ExecutionState.CANCELED)).isGreaterThan(0);
+        } catch (Exception e) {
+            e.printStackTrace();
+            fail(e.getMessage());
+        }
+    }
 
-			final ExecutionJobVertex ejv = getExecutionVertex(
-				jid,
-				executionContext
-			);
+    @Test
+    void testRepeatedCancelFromRunning() {
+        try {
+            final ExecutionVertex vertex = getExecutionVertex();
 
-			final ExecutionVertex vertex = new ExecutionVertex(ejv, 0, new IntermediateResult[0],
-					AkkaUtils.getDefaultTimeout());
+            LogicalSlot slot =
+                    new TestingLogicalSlotBuilder()
+                            .setTaskManagerGateway(
+                                    new CancelSequenceSimpleAckingTaskManagerGateway(1))
+                            .createTestingLogicalSlot();
 
-			setVertexState(vertex, ExecutionState.SCHEDULED);
-			assertEquals(ExecutionState.SCHEDULED, vertex.getExecutionState());
+            setVertexResource(vertex, slot);
+            setVertexState(vertex, ExecutionState.RUNNING);
 
-			ActorGateway actorGateway = new CancelSequenceActorGateway(
-					executionContext, 2);
+            assertThat(vertex.getExecutionState()).isEqualTo(ExecutionState.RUNNING);
 
-			Instance instance = getInstance(new ActorTaskManagerGateway(actorGateway));
-			SimpleSlot slot = instance.allocateSimpleSlot(new JobID());
+            vertex.cancel();
 
-			vertex.deployToSlot(slot);
+            assertThat(vertex.getExecutionState()).isEqualTo(ExecutionState.CANCELING);
 
-			assertEquals(ExecutionState.DEPLOYING, vertex.getExecutionState());
+            vertex.cancel();
 
-			vertex.cancel();
+            assertThat(vertex.getExecutionState()).isEqualTo(ExecutionState.CANCELING);
 
-			assertEquals(ExecutionState.CANCELING, vertex.getExecutionState());
+            // callback by TaskManager after canceling completes
+            vertex.getCurrentExecutionAttempt().completeCancelling();
 
-			// first action happens (deploy)
-			actions.triggerNextAction();
-			assertEquals(ExecutionState.CANCELING, vertex.getExecutionState());
+            assertThat(vertex.getExecutionState()).isEqualTo(ExecutionState.CANCELED);
 
-			// the deploy call found itself in canceling after it returned and needs to send a cancel call
-			// the call did not yet execute, so it is still in canceling
-			assertEquals(ExecutionState.CANCELING, vertex.getExecutionState());
+            assertThat(slot.isAlive()).isFalse();
 
-			// second action happens (cancel call from cancel function)
-			actions.triggerNextAction();
+            assertThat(vertex.getFailureInfo()).isNotPresent();
 
-			// TaskManager reports back (canceling done)
-			vertex.getCurrentExecutionAttempt().cancelingComplete();
+            assertThat(vertex.getStateTimestamp(ExecutionState.CREATED)).isGreaterThan(0);
+            assertThat(vertex.getStateTimestamp(ExecutionState.CANCELING)).isGreaterThan(0);
+            assertThat(vertex.getStateTimestamp(ExecutionState.CANCELED)).isGreaterThan(0);
+        } catch (Exception e) {
+            e.printStackTrace();
+            fail(e.getMessage());
+        }
+    }
 
-			// should properly set state to cancelled
-			assertEquals(ExecutionState.CANCELED, vertex.getExecutionState());
+    @Test
+    void testCancelFromRunningDidNotFindTask() {
+        // this may happen when the task finished or failed while the call was in progress
+        try {
+            final ExecutionVertex vertex = getExecutionVertex();
+
+            LogicalSlot slot =
+                    new TestingLogicalSlotBuilder()
+                            .setTaskManagerGateway(
+                                    new CancelSequenceSimpleAckingTaskManagerGateway(1))
+                            .createTestingLogicalSlot();
 
-			// trigger the correction canceling call
-			actions.triggerNextAction();
-			assertEquals(ExecutionState.CANCELED, vertex.getExecutionState());
-
-			assertTrue(slot.isReleased());
-
-			assertNull(vertex.getFailureCause());
-
-			assertTrue(vertex.getStateTimestamp(ExecutionState.CREATED) > 0);
-			assertTrue(vertex.getStateTimestamp(ExecutionState.CANCELING) > 0);
-			assertTrue(vertex.getStateTimestamp(ExecutionState.CANCELED) > 0);
-		}
-		catch(Exception e) {
-			e.printStackTrace();
-			fail(e.getMessage());
-		}
-	}
-
-	@Test
-	public void testCancelConcurrentlyToDeploying_CallsOvertaking() {
-		try {
-			final JobVertexID jid = new JobVertexID();
-
-			final TestingUtils.QueuedActionExecutionContext executionContext = TestingUtils.queuedActionExecutionContext();
-			final TestingUtils.ActionQueue actions = executionContext.actionQueue();
-
-			final ExecutionJobVertex ejv = getExecutionVertex(jid, executionContext);
-
-			final ExecutionVertex vertex = new ExecutionVertex(ejv, 0, new IntermediateResult[0],
-					AkkaUtils.getDefaultTimeout());
-
-			setVertexState(vertex, ExecutionState.SCHEDULED);
-			assertEquals(ExecutionState.SCHEDULED, vertex.getExecutionState());
-
-			// task manager cancel sequence mock actor
-			// first return NOT SUCCESS (task not found, cancel call overtook deploy call), then success (cancel call after deploy call)
-			ActorGateway actorGateway = new CancelSequenceActorGateway(
-					executionContext,
-					2);
-
-			Instance instance = getInstance(new ActorTaskManagerGateway(actorGateway));
-			SimpleSlot slot = instance.allocateSimpleSlot(new JobID());
-
-			vertex.deployToSlot(slot);
-
-			assertEquals(ExecutionState.DEPLOYING, vertex.getExecutionState());
-
-			vertex.cancel();
-
-			assertEquals(ExecutionState.CANCELING, vertex.getExecutionState());
-
-			// first action happens (deploy)
-			Runnable deployAction = actions.popNextAction();
-			Runnable cancelAction = actions.popNextAction();
-
-			// cancel call first
-			cancelAction.run();
-			// process onComplete callback
-			actions.triggerNextAction();
-
-			// did not find the task, not properly cancelled, stay in canceling
-			assertEquals(ExecutionState.CANCELING, vertex.getExecutionState());
-
-			// deploy action next
-			deployAction.run();
-
-			// the deploy call found itself in canceling after it returned and needs to send a cancel call
-			// the call did not yet execute, so it is still in canceling
-			assertEquals(ExecutionState.CANCELING, vertex.getExecutionState());
-
-			vertex.getCurrentExecutionAttempt().cancelingComplete();
-
-			assertEquals(ExecutionState.CANCELED, vertex.getExecutionState());
-
-			assertTrue(slot.isReleased());
-
-			assertNull(vertex.getFailureCause());
-
-			assertTrue(vertex.getStateTimestamp(ExecutionState.CREATED) > 0);
-			assertTrue(vertex.getStateTimestamp(ExecutionState.CANCELING) > 0);
-			assertTrue(vertex.getStateTimestamp(ExecutionState.CANCELED) > 0);
-		} catch (Exception e) {
-			e.printStackTrace();
-			fail(e.getMessage());
-		}
-	}
-
-	@Test
-	public void testCancelFromRunning() {
-		try {
-			final JobVertexID jid = new JobVertexID();
-			final ExecutionJobVertex ejv = getExecutionVertex(jid, new DirectScheduledExecutorService());
-
-			final ExecutionVertex vertex = new ExecutionVertex(ejv, 0, new IntermediateResult[0],
-					AkkaUtils.getDefaultTimeout());
-
-			ActorGateway actorGateway = new CancelSequenceActorGateway(
-					TestingUtils.directExecutionContext(),
-					1);
-
-			Instance instance = getInstance(new ActorTaskManagerGateway(actorGateway));
-			SimpleSlot slot = instance.allocateSimpleSlot(new JobID());
-
-			setVertexState(vertex, ExecutionState.RUNNING);
-			setVertexResource(vertex, slot);
-
-			assertEquals(ExecutionState.RUNNING, vertex.getExecutionState());
-
-			vertex.cancel();
-			vertex.getCurrentExecutionAttempt().cancelingComplete(); // response by task manager once actually canceled
-
-			assertEquals(ExecutionState.CANCELED, vertex.getExecutionState());
-
-			assertTrue(slot.isReleased());
-
-			assertNull(vertex.getFailureCause());
-
-			assertTrue(vertex.getStateTimestamp(ExecutionState.CREATED) > 0);
-			assertTrue(vertex.getStateTimestamp(ExecutionState.CANCELING) > 0);
-			assertTrue(vertex.getStateTimestamp(ExecutionState.CANCELED) > 0);
-		} catch (Exception e) {
-			e.printStackTrace();
-			fail(e.getMessage());
-		}
-	}
-
-	@Test
-	public void testRepeatedCancelFromRunning() {
-		try {
-
-			final JobVertexID jid = new JobVertexID();
-			final ExecutionJobVertex ejv = getExecutionVertex(jid, new DirectScheduledExecutorService());
-
-			final ExecutionVertex vertex = new ExecutionVertex(ejv, 0, new IntermediateResult[0],
-					AkkaUtils.getDefaultTimeout());
-
-			final ActorGateway actorGateway = new CancelSequenceActorGateway(
-					TestingUtils.directExecutionContext(),
-					1);
-
-			Instance instance = getInstance(new ActorTaskManagerGateway(actorGateway));
-			SimpleSlot slot = instance.allocateSimpleSlot(new JobID());
-
-			setVertexState(vertex, ExecutionState.RUNNING);
-			setVertexResource(vertex, slot);
-
-			assertEquals(ExecutionState.RUNNING, vertex.getExecutionState());
-
-			vertex.cancel();
-
-			assertEquals(ExecutionState.CANCELING, vertex.getExecutionState());
-
-			vertex.cancel();
-
-			assertEquals(ExecutionState.CANCELING, vertex.getExecutionState());
-
-			// callback by TaskManager after canceling completes
-			vertex.getCurrentExecutionAttempt().cancelingComplete();
-
-			assertEquals(ExecutionState.CANCELED, vertex.getExecutionState());
-
-			assertTrue(slot.isReleased());
-
-			assertNull(vertex.getFailureCause());
-
-			assertTrue(vertex.getStateTimestamp(ExecutionState.CREATED) > 0);
-			assertTrue(vertex.getStateTimestamp(ExecutionState.CANCELING) > 0);
-			assertTrue(vertex.getStateTimestamp(ExecutionState.CANCELED) > 0);
-		} catch (Exception e) {
-			e.printStackTrace();
-			fail(e.getMessage());
-		}
-	}
-
-	@Test
-	public void testCancelFromRunningDidNotFindTask() {
-		// this may happen when the task finished or failed while the call was in progress
-		try {
-			final JobVertexID jid = new JobVertexID();
-			final ExecutionJobVertex ejv = getExecutionVertex(jid, new DirectScheduledExecutorService());
-
-			final ExecutionVertex vertex = new ExecutionVertex(ejv, 0, new IntermediateResult[0],
-					AkkaUtils.getDefaultTimeout());
-
-			final ActorGateway actorGateway = new CancelSequenceActorGateway(
-					TestingUtils.directExecutionContext(),
-					1);
-
-			Instance instance = getInstance(new ActorTaskManagerGateway(actorGateway));
-			SimpleSlot slot = instance.allocateSimpleSlot(new JobID());
-
-			setVertexState(vertex, ExecutionState.RUNNING);
-			setVertexResource(vertex, slot);
-
-			assertEquals(ExecutionState.RUNNING, vertex.getExecutionState());
-
-			vertex.cancel();
-
-			assertEquals(ExecutionState.CANCELING, vertex.getExecutionState());
-
-			assertNull(vertex.getFailureCause());
-
-			assertTrue(vertex.getStateTimestamp(ExecutionState.CREATED) > 0);
-			assertTrue(vertex.getStateTimestamp(ExecutionState.CANCELING) > 0);
-		} catch (Exception e) {
-			e.printStackTrace();
-			fail(e.getMessage());
-		}
-	}
-
-	@Test
-	public void testCancelCallFails() {
-		try {
-			final JobVertexID jid = new JobVertexID();
-			final ExecutionJobVertex ejv = getExecutionVertex(jid, new DirectScheduledExecutorService());
-
-			final ExecutionVertex vertex = new ExecutionVertex(ejv, 0, new IntermediateResult[0],
-					AkkaUtils.getDefaultTimeout());
-
-			final ActorGateway gateway = new CancelSequenceActorGateway(TestingUtils.directExecutionContext(), 0);
-
-			Instance instance = getInstance(new ActorTaskManagerGateway(gateway));
-			SimpleSlot slot = instance.allocateSimpleSlot(new JobID());
-
-			setVertexState(vertex, ExecutionState.RUNNING);
-			setVertexResource(vertex, slot);
-
-			assertEquals(ExecutionState.RUNNING, vertex.getExecutionState());
-
-			vertex.cancel();
-
-			// Callback fails, leading to CANCELED
-			assertEquals(ExecutionState.CANCELED, vertex.getExecutionState());
-
-			assertTrue(slot.isReleased());
-
-			assertTrue(vertex.getStateTimestamp(ExecutionState.CREATED) > 0);
-			assertTrue(vertex.getStateTimestamp(ExecutionState.CANCELING) > 0);
-		} catch (Exception e) {
-			e.printStackTrace();
-			fail(e.getMessage());
-		}
-	}
-
-	@Test
-	public void testSendCancelAndReceiveFail() throws Exception {
-		final ExecutionGraph graph = ExecutionGraphTestUtils.createSimpleTestGraph();
-
-		graph.scheduleForExecution();
-		ExecutionGraphTestUtils.switchAllVerticesToRunning(graph);
-		assertEquals(JobStatus.RUNNING, graph.getState());
-
-		final ExecutionVertex[] vertices = graph.getVerticesTopologically().iterator().next().getTaskVertices();
-		assertEquals(vertices.length, graph.getRegisteredExecutions().size());
-
-		final Execution exec = vertices[3].getCurrentExecutionAttempt();
-		exec.cancel();
-		assertEquals(ExecutionState.CANCELING, exec.getState());
-
-		exec.markFailed(new Exception("test"));
-		assertTrue(exec.getState() == ExecutionState.FAILED || exec.getState() == ExecutionState.CANCELED);
-
-		assertTrue(exec.getAssignedResource().isCanceled());
-		assertEquals(vertices.length - 1, exec.getVertex().getExecutionGraph().getRegisteredExecutions().size());
-	}
-
-	// --------------------------------------------------------------------------------------------
-	//  Actions after a vertex has been canceled or while canceling
-	// --------------------------------------------------------------------------------------------
-
-	@Test
-	public void testScheduleOrDeployAfterCancel() {
-		try {
-			final JobVertexID jid = new JobVertexID();
-			final ExecutionJobVertex ejv = getExecutionVertex(jid);
-
-			final ExecutionVertex vertex = new ExecutionVertex(ejv, 0, new IntermediateResult[0],
-					AkkaUtils.getDefaultTimeout());
-			setVertexState(vertex, ExecutionState.CANCELED);
-
-			assertEquals(ExecutionState.CANCELED, vertex.getExecutionState());
-
-			// 1)
-			// scheduling after being canceled should be tolerated (no exception) because
-			// it can occur as the result of races
-			{
-				Scheduler scheduler = mock(Scheduler.class);
-				vertex.scheduleForExecution(scheduler, false);
-
-				assertEquals(ExecutionState.CANCELED, vertex.getExecutionState());
-			}
-
-			// 2)
-			// deploying after canceling from CREATED needs to raise an exception, because
-			// the scheduler (or any caller) needs to know that the slot should be released
-			try {
-				Instance instance = getInstance(new ActorTaskManagerGateway(DummyActorGateway.INSTANCE));
-				SimpleSlot slot = instance.allocateSimpleSlot(new JobID());
-
-				vertex.deployToSlot(slot);
-				fail("Method should throw an exception");
-			}
-			catch (IllegalStateException e) {
-				assertEquals(ExecutionState.CANCELED, vertex.getExecutionState());
-			}
-		}
-		catch (Exception e) {
-			e.printStackTrace();
-			fail(e.getMessage());
-		}
-	}
-
-	@Test
-	public void testActionsWhileCancelling() {
-
-		try {
-			final JobVertexID jid = new JobVertexID();
-			final ExecutionJobVertex ejv = getExecutionVertex(jid);
-
-			// scheduling while canceling is an illegal state transition
-			try {
-				ExecutionVertex vertex = new ExecutionVertex(ejv, 0, new IntermediateResult[0],
-						AkkaUtils.getDefaultTimeout());
-				setVertexState(vertex, ExecutionState.CANCELING);
-
-				Scheduler scheduler = mock(Scheduler.class);
-				vertex.scheduleForExecution(scheduler, false);
-			}
-			catch (Exception e) {
-				fail("should not throw an exception");
-			}
-
-
-			// deploying while in canceling state is illegal (should immediately go to canceled)
-			try {
-				ExecutionVertex vertex = new ExecutionVertex(ejv, 0, new IntermediateResult[0],
-						AkkaUtils.getDefaultTimeout());
-				setVertexState(vertex, ExecutionState.CANCELING);
-
-				Instance instance = getInstance(new ActorTaskManagerGateway(DummyActorGateway.INSTANCE));
-				SimpleSlot slot = instance.allocateSimpleSlot(new JobID());
-
-				vertex.deployToSlot(slot);
-				fail("Method should throw an exception");
-			}
-			catch (IllegalStateException e) {
-				// that is what we expect
-			}
-
-
-			// fail while canceling
-			{
-				ExecutionVertex vertex = new ExecutionVertex(ejv, 0, new IntermediateResult[0],
-						AkkaUtils.getDefaultTimeout());
-
-				Instance instance = getInstance(new ActorTaskManagerGateway(DummyActorGateway.INSTANCE));
-				SimpleSlot slot = instance.allocateSimpleSlot(new JobID());
-
-				setVertexResource(vertex, slot);
-				setVertexState(vertex, ExecutionState.CANCELING);
-
-				Exception failureCause = new Exception("test exception");
-
-				vertex.fail(failureCause);
-				assertEquals(ExecutionState.CANCELED, vertex.getExecutionState());
-
-				assertTrue(slot.isReleased());
-			}
-		}
-		catch (Exception e) {
-			e.printStackTrace();
-			fail(e.getMessage());
-		}
-	}
-
-	public static class CancelSequenceActorGateway extends BaseTestingActorGateway {
-		private final int successfulOperations;
-		private int index = -1;
-
-		public CancelSequenceActorGateway(ExecutionContext executionContext, int successfulOperations) {
-			super(executionContext);
-			this.successfulOperations = successfulOperations;
-		}
-
-		@Override
-		public Object handleMessage(Object message) throws Exception {
-			Object result;
-			if(message instanceof SubmitTask) {
-				result = Acknowledge.get();
-			} else if(message instanceof CancelTask) {
-				index++;
-
-				if(index >= successfulOperations){
-					throw new IOException("RPC call failed.");
-				} else {
-					result = Acknowledge.get();
-				}
-			} else {
-				result = null;
-			}
-
-			return result;
-		}
-	}
+            setVertexResource(vertex, slot);
+            setVertexState(vertex, ExecutionState.RUNNING);
+
+            assertThat(vertex.getExecutionState()).isEqualTo(ExecutionState.RUNNING);
+
+            vertex.cancel();
+
+            assertThat(vertex.getExecutionState()).isEqualTo(ExecutionState.CANCELING);
+
+            assertThat(vertex.getFailureInfo()).isNotPresent();
+
+            assertThat(vertex.getStateTimestamp(ExecutionState.CREATED)).isGreaterThan(0);
+            assertThat(vertex.getStateTimestamp(ExecutionState.CANCELING)).isGreaterThan(0);
+        } catch (Exception e) {
+            e.printStackTrace();
+            fail(e.getMessage());
+        }
+    }
+
+    @Test
+    void testCancelCallFails() {
+        try {
+            final ExecutionVertex vertex = getExecutionVertex();
+
+            LogicalSlot slot =
+                    new TestingLogicalSlotBuilder()
+                            .setTaskManagerGateway(
+                                    new CancelSequenceSimpleAckingTaskManagerGateway(0))
+                            .createTestingLogicalSlot();
+
+            setVertexResource(vertex, slot);
+            setVertexState(vertex, ExecutionState.RUNNING);
+
+            assertThat(vertex.getExecutionState()).isEqualTo(ExecutionState.RUNNING);
+
+            vertex.cancel();
+
+            // Callback fails, leading to CANCELED
+            assertThat(vertex.getExecutionState()).isEqualTo(ExecutionState.CANCELED);
+
+            assertThat(slot.isAlive()).isFalse();
+
+            assertThat(vertex.getStateTimestamp(ExecutionState.CREATED)).isGreaterThan(0);
+            assertThat(vertex.getStateTimestamp(ExecutionState.CANCELING)).isGreaterThan(0);
+        } catch (Exception e) {
+            e.printStackTrace();
+            fail(e.getMessage());
+        }
+    }
+
+    @Test
+    void testSendCancelAndReceiveFail() throws Exception {
+        final SchedulerBase scheduler =
+                SchedulerTestingUtils.createScheduler(
+                        JobGraphTestUtils.streamingJobGraph(createNoOpVertex(10)),
+                        new NoMainThreadCheckComponentMainThreadExecutor(),
+                        EXECUTOR_RESOURCE.getExecutor());
+        final ExecutionGraph graph = scheduler.getExecutionGraph();
+
+        scheduler.startScheduling();
+        for (ExecutionVertex ev : graph.getAllExecutionVertices()) {
+            ExecutionUtils.waitForTaskDeploymentDescriptorsCreation(ev);
+        }
+        ExecutionGraphTestUtils.switchAllVerticesToRunning(graph);
+        assertThat(graph.getState()).isEqualTo(JobStatus.RUNNING);
+
+        final ExecutionVertex[] vertices =
+                graph.getVerticesTopologically().iterator().next().getTaskVertices();
+        assertThat(graph.getRegisteredExecutions()).hasSize(vertices.length);
+
+        final Execution exec = vertices[3].getCurrentExecutionAttempt();
+        exec.cancel();
+        assertThat(exec.getState()).isEqualTo(ExecutionState.CANCELING);
+
+        exec.markFailed(new Exception("test"));
+        assertThat(
+                        exec.getState() == ExecutionState.FAILED
+                                || exec.getState() == ExecutionState.CANCELED)
+                .isTrue();
+
+        assertThat(exec.getAssignedResource().isAlive()).isFalse();
+        assertThat(graph.getRegisteredExecutions()).hasSize(vertices.length - 1);
+    }
+
+    private static class CancelSequenceSimpleAckingTaskManagerGateway
+            extends SimpleAckingTaskManagerGateway {
+        private final int successfulOperations;
+        private int index = -1;
+
+        public CancelSequenceSimpleAckingTaskManagerGateway(int successfulOperations) {
+            super();
+            this.successfulOperations = successfulOperations;
+        }
+
+        @Override
+        public CompletableFuture<Acknowledge> cancelTask(
+                ExecutionAttemptID executionAttemptID, Duration timeout) {
+            index++;
+
+            if (index >= successfulOperations) {
+                return FutureUtils.completedExceptionally(new IOException("Rpc call fails"));
+            } else {
+                return CompletableFuture.completedFuture(Acknowledge.get());
+            }
+        }
+    }
 }

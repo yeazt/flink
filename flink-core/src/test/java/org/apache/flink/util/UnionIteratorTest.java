@@ -18,126 +18,83 @@
 
 package org.apache.flink.util;
 
-import org.apache.flink.util.TraversableOnceException;
-import org.apache.flink.util.UnionIterator;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.NoSuchElementException;
 
-import static org.junit.Assert.*;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-public class UnionIteratorTest {
+/** Tests for the {@link UnionIterator}. */
+class UnionIteratorTest {
 
-	@Test
-	public void testUnion() {
-		try {
-			UnionIterator<Integer> iter = new UnionIterator<>();
+    @Test
+    void testUnion() {
+        UnionIterator<Integer> iter = new UnionIterator<>();
 
-			// should succeed and be empty
-			assertFalse(iter.iterator().hasNext());
+        // should succeed and be empty
+        assertThat(iter.iterator()).isExhausted();
 
-			iter.clear();
-			
-			try {
-				iter.iterator().next();
-				fail("should fail with an exception");
-			} catch (NoSuchElementException e) {
-				// expected
-			}
+        iter.clear();
 
-			iter.clear();
-			iter.addList(Arrays.asList(1, 2, 3, 4, 5, 6, 7));
-			iter.addList(Collections.<Integer>emptyList());
-			iter.addList(Arrays.asList(8, 9, 10, 11));
-			
-			int val = 1;
-			for (int i : iter) {
-				assertEquals(val++, i);
-			}
-		}
-		catch (Exception e) {
-			e.printStackTrace();
-			fail(e.getMessage());
-		}
-	}
-	
-	@Test
-	public void testTraversableOnce() {
-		try {
-			UnionIterator<Integer> iter = new UnionIterator<>();
-			
-			// should succeed
-			iter.iterator();
-			
-			// should fail
-			try {
-				iter.iterator();
-				fail("should fail with an exception");
-			} catch (TraversableOnceException e) {
-				// expected
-			}
+        assertThatThrownBy(() -> iter.iterator().next()).isInstanceOf(NoSuchElementException.class);
 
-			// should fail again
-			try {
-				iter.iterator();
-				fail("should fail with an exception");
-			} catch (TraversableOnceException e) {
-				// expected
-			}
+        iter.clear();
+        iter.addList(Arrays.asList(1, 2, 3, 4, 5, 6, 7));
+        iter.addList(Collections.emptyList());
+        iter.addList(Arrays.asList(8, 9, 10, 11));
 
-			// reset the thing, keep it empty
-			iter.clear();
+        int val = 1;
+        for (int i : iter) {
+            assertThat(i).isEqualTo(val++);
+        }
+    }
 
-			// should succeed
-			iter.iterator();
+    @Test
+    void testTraversableOnce() {
+        UnionIterator<Integer> iter = new UnionIterator<>();
 
-			// should fail
-			try {
-				iter.iterator();
-				fail("should fail with an exception");
-			} catch (TraversableOnceException e) {
-				// expected
-			}
+        // should succeed
+        iter.iterator();
 
-			// should fail again
-			try {
-				iter.iterator();
-				fail("should fail with an exception");
-			} catch (TraversableOnceException e) {
-				// expected
-			}
+        // should fail
+        assertThatThrownBy(iter::iterator).isInstanceOf(TraversableOnceException.class);
 
-			// reset the thing, add some data
-			iter.clear();
-			iter.addList(Arrays.asList(1, 2, 3, 4, 5, 6, 7));
-			
-			// should succeed
-			Iterator<Integer> ints = iter.iterator();
-			assertNotNull(ints.next());
-			assertNotNull(ints.next());
-			assertNotNull(ints.next());
-			
-			// should fail if called in the middle of operations
-			try {
-				iter.iterator();
-				fail("should fail with an exception");
-			} catch (TraversableOnceException e) {
-				// expected
-			}
+        // should fail again
+        assertThatThrownBy(iter::iterator).isInstanceOf(TraversableOnceException.class);
 
-			// reset the thing, keep it empty
-			iter.clear();
+        // reset the thing, keep it empty
+        iter.clear();
 
-			// should succeed again
-			assertFalse(iter.iterator().hasNext());
-			
-		}
-		catch (Exception e) {
-			e.printStackTrace();
-			fail(e.getMessage());
-		}
-	}
+        // should succeed
+        iter.iterator();
+
+        // should fail
+        assertThatThrownBy(iter::iterator).isInstanceOf(TraversableOnceException.class);
+
+        // should fail again
+        assertThatThrownBy(iter::iterator).isInstanceOf(TraversableOnceException.class);
+
+        // reset the thing, add some data
+        iter.clear();
+        iter.addList(Arrays.asList(1, 2, 3, 4, 5, 6, 7));
+
+        // should succeed
+        Iterator<Integer> ints = iter.iterator();
+        assertThat(ints.next()).isNotNull();
+        assertThat(ints.next()).isNotNull();
+        assertThat(ints.next()).isNotNull();
+
+        // should fail if called in the middle of operations
+        assertThatThrownBy(iter::iterator).isInstanceOf(TraversableOnceException.class);
+
+        // reset the thing, keep it empty
+        iter.clear();
+
+        // should succeed again
+        assertThat(iter.iterator()).isExhausted();
+    }
 }

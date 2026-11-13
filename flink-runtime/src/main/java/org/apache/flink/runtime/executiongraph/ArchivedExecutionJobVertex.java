@@ -18,8 +18,10 @@
 package org.apache.flink.runtime.executiongraph;
 
 import org.apache.flink.runtime.accumulators.StringifiedAccumulatorResult;
+import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.execution.ExecutionState;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
+import org.apache.flink.runtime.jobmanager.scheduler.SlotSharingGroup;
 
 import java.io.Serializable;
 
@@ -27,94 +29,113 @@ import static org.apache.flink.runtime.executiongraph.ExecutionJobVertex.getAggr
 
 public class ArchivedExecutionJobVertex implements AccessExecutionJobVertex, Serializable {
 
-	private static final long serialVersionUID = -5768187638639437957L;
-	private final ArchivedExecutionVertex[] taskVertices;
+    private static final long serialVersionUID = -5768187638639437957L;
+    private final ArchivedExecutionVertex[] taskVertices;
 
-	private final JobVertexID id;
+    private final JobVertexID id;
 
-	private final String name;
+    private final String name;
 
-	private final int parallelism;
+    private final int parallelism;
 
-	private final int maxParallelism;
+    private final int maxParallelism;
 
-	private final StringifiedAccumulatorResult[] archivedUserAccumulators;
+    private final SlotSharingGroup slotSharingGroup;
 
-	public ArchivedExecutionJobVertex(ExecutionJobVertex jobVertex) {
-		this.taskVertices = new ArchivedExecutionVertex[jobVertex.getTaskVertices().length];
-		for (int x = 0; x < taskVertices.length; x++) {
-			taskVertices[x] = jobVertex.getTaskVertices()[x].archive();
-		}
+    private final ResourceProfile resourceProfile;
 
-		archivedUserAccumulators = jobVertex.getAggregatedUserAccumulatorsStringified();
+    private final StringifiedAccumulatorResult[] archivedUserAccumulators;
 
-		this.id = jobVertex.getJobVertexId();
-		this.name = jobVertex.getJobVertex().getName();
-		this.parallelism = jobVertex.getParallelism();
-		this.maxParallelism = jobVertex.getMaxParallelism();
-	}
+    public ArchivedExecutionJobVertex(ExecutionJobVertex jobVertex) {
+        this.taskVertices = new ArchivedExecutionVertex[jobVertex.getTaskVertices().length];
+        for (int x = 0; x < taskVertices.length; x++) {
+            taskVertices[x] = jobVertex.getTaskVertices()[x].archive();
+        }
 
-	public ArchivedExecutionJobVertex(
-			ArchivedExecutionVertex[] taskVertices,
-			JobVertexID id,
-			String name,
-			int parallelism,
-			int maxParallelism,
-			StringifiedAccumulatorResult[] archivedUserAccumulators) {
-		this.taskVertices = taskVertices;
-		this.id = id;
-		this.name = name;
-		this.parallelism = parallelism;
-		this.maxParallelism = maxParallelism;
-		this.archivedUserAccumulators = archivedUserAccumulators;
-	}
+        archivedUserAccumulators = jobVertex.getAggregatedUserAccumulatorsStringified();
 
-	// --------------------------------------------------------------------------------------------
-	//   Accessors
-	// --------------------------------------------------------------------------------------------
+        this.id = jobVertex.getJobVertexId();
+        this.name = jobVertex.getJobVertex().getName();
+        this.parallelism = jobVertex.getParallelism();
+        this.maxParallelism = jobVertex.getMaxParallelism();
+        this.slotSharingGroup = jobVertex.getSlotSharingGroup();
+        this.resourceProfile = jobVertex.getResourceProfile();
+    }
 
-	@Override
-	public String getName() {
-		return name;
-	}
+    public ArchivedExecutionJobVertex(
+            ArchivedExecutionVertex[] taskVertices,
+            JobVertexID id,
+            String name,
+            int parallelism,
+            int maxParallelism,
+            SlotSharingGroup slotSharingGroup,
+            ResourceProfile resourceProfile,
+            StringifiedAccumulatorResult[] archivedUserAccumulators) {
+        this.taskVertices = taskVertices;
+        this.id = id;
+        this.name = name;
+        this.parallelism = parallelism;
+        this.maxParallelism = maxParallelism;
+        this.slotSharingGroup = slotSharingGroup;
+        this.resourceProfile = resourceProfile;
+        this.archivedUserAccumulators = archivedUserAccumulators;
+    }
 
-	@Override
-	public int getParallelism() {
-		return parallelism;
-	}
+    // --------------------------------------------------------------------------------------------
+    //   Accessors
+    // --------------------------------------------------------------------------------------------
 
-	@Override
-	public int getMaxParallelism() {
-		return maxParallelism;
-	}
+    @Override
+    public String getName() {
+        return name;
+    }
 
-	@Override
-	public JobVertexID getJobVertexId() {
-		return id;
-	}
+    @Override
+    public int getParallelism() {
+        return parallelism;
+    }
 
-	@Override
-	public ArchivedExecutionVertex[] getTaskVertices() {
-		return taskVertices;
-	}
+    @Override
+    public int getMaxParallelism() {
+        return maxParallelism;
+    }
 
-	@Override
-	public ExecutionState getAggregateState() {
-		int[] num = new int[ExecutionState.values().length];
-		for (ArchivedExecutionVertex vertex : this.taskVertices) {
-			num[vertex.getExecutionState().ordinal()]++;
-		}
+    @Override
+    public SlotSharingGroup getSlotSharingGroup() {
+        return slotSharingGroup;
+    }
 
-		return getAggregateJobVertexState(num, parallelism);
-	}
+    @Override
+    public ResourceProfile getResourceProfile() {
+        return resourceProfile;
+    }
 
-	// --------------------------------------------------------------------------------------------
-	//  Static / pre-assigned input splits
-	// --------------------------------------------------------------------------------------------
+    @Override
+    public JobVertexID getJobVertexId() {
+        return id;
+    }
 
-	@Override
-	public StringifiedAccumulatorResult[] getAggregatedUserAccumulatorsStringified() {
-		return archivedUserAccumulators;
-	}
+    @Override
+    public ArchivedExecutionVertex[] getTaskVertices() {
+        return taskVertices;
+    }
 
+    @Override
+    public ExecutionState getAggregateState() {
+        int[] num = new int[ExecutionState.values().length];
+        for (ArchivedExecutionVertex vertex : this.taskVertices) {
+            num[vertex.getExecutionState().ordinal()]++;
+        }
+
+        return getAggregateJobVertexState(num, parallelism);
+    }
+
+    // --------------------------------------------------------------------------------------------
+    //  Static / pre-assigned input splits
+    // --------------------------------------------------------------------------------------------
+
+    @Override
+    public StringifiedAccumulatorResult[] getAggregatedUserAccumulatorsStringified() {
+        return archivedUserAccumulators;
+    }
 }

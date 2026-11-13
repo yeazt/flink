@@ -21,6 +21,8 @@ package org.apache.flink.annotation;
 
 import java.lang.annotation.Documented;
 import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
 /**
@@ -30,12 +32,11 @@ import java.lang.annotation.Target;
  * However, their interfaces and signatures are not considered to be stable and might be changed
  * across versions.
  *
- * <p>This annotation also excludes methods and classes with evolving interfaces / signatures
- * within classes annotated with {@link Public}.
- *
+ * <p>This annotation also excludes methods and classes with evolving interfaces / signatures within
+ * classes annotated with {@link Public}.
  */
 @Documented
-@Target({ ElementType.TYPE, ElementType.METHOD, ElementType.FIELD, ElementType.CONSTRUCTOR })
+@Target({ElementType.TYPE, ElementType.METHOD, ElementType.FIELD, ElementType.CONSTRUCTOR})
 @Public
-public @interface PublicEvolving {
-}
+@Retention(RetentionPolicy.RUNTIME)
+public @interface PublicEvolving {}

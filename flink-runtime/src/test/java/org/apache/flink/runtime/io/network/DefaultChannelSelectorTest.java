@@ -18,34 +18,32 @@
 
 package org.apache.flink.runtime.io.network;
 
-import static org.junit.Assert.assertEquals;
-
+import org.apache.flink.runtime.io.network.api.writer.ChannelSelector;
 import org.apache.flink.runtime.io.network.api.writer.RoundRobinChannelSelector;
 import org.apache.flink.types.StringValue;
-import org.junit.Test;
 
-/**
- * This class checks the functionality of the {@link RoundRobinChannelSelector} class.
- * 
- */
-public class DefaultChannelSelectorTest {
+import org.junit.jupiter.api.Test;
 
-	/**
-	 * This test checks the channel selection
-	 */
-	@Test
-	public void channelSelect() {
+import static org.assertj.core.api.Assertions.assertThat;
 
-		final StringValue dummyRecord = new StringValue("abc");
-		final RoundRobinChannelSelector<StringValue> selector = new RoundRobinChannelSelector<StringValue>();
-		// Test with two channels
-		final int numberOfOutputChannels = 2;
-		int[] selectedChannels = selector.selectChannels(dummyRecord, numberOfOutputChannels);
-		assertEquals(1, selectedChannels.length);
-		assertEquals(1, selectedChannels[0]);
-		selectedChannels = selector.selectChannels(dummyRecord, numberOfOutputChannels);
-		assertEquals(1, selectedChannels.length);
-		assertEquals(0, selectedChannels[0]);
-	}
+/** This class checks the functionality of the {@link RoundRobinChannelSelector} class. */
+class DefaultChannelSelectorTest {
 
+    /** This test checks the channel selection. */
+    @Test
+    void channelSelect() {
+        final StringValue dummyRecord = new StringValue("abc");
+        final RoundRobinChannelSelector<StringValue> selector = new RoundRobinChannelSelector<>();
+        selector.setup(2);
+
+        assertSelectedChannel(selector, dummyRecord, 0);
+        assertSelectedChannel(selector, dummyRecord, 1);
+    }
+
+    private void assertSelectedChannel(
+            ChannelSelector<StringValue> selector, StringValue record, int expectedChannel) {
+
+        int actualResult = selector.selectChannel(record);
+        assertThat(actualResult).isEqualTo(expectedChannel);
+    }
 }

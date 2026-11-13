@@ -18,18 +18,114 @@
 
 package org.apache.flink.runtime.webmonitor.handlers;
 
-import org.junit.Assert;
-import org.junit.Test;
+import org.apache.flink.runtime.dispatcher.DispatcherGateway;
+import org.apache.flink.runtime.rest.handler.HandlerRequest;
+import org.apache.flink.runtime.rest.handler.RestHandlerException;
+import org.apache.flink.runtime.rest.messages.EmptyMessageParameters;
+import org.apache.flink.runtime.rest.messages.EmptyRequestBody;
+import org.apache.flink.runtime.webmonitor.TestingDispatcherGateway;
+import org.apache.flink.util.ExceptionUtils;
+import org.apache.flink.util.concurrent.Executors;
 
-/**
- * Tests for the JarUploadHandler.
- */
-public class JarUploadHandlerTest {
-	@Test
-	public void testGetPaths() {
-		JarUploadHandler handler = new JarUploadHandler(null);
-		String[] paths = handler.getPaths();
-		Assert.assertEquals(1, paths.length);
-		Assert.assertEquals("/jars/upload", paths[0]);
-	}
+import org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpResponseStatus;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.io.File;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.Collections;
+import java.util.concurrent.CompletableFuture;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+/** Tests for {@link JarUploadHandler}. */
+class JarUploadHandlerTest {
+
+    private JarUploadHandler jarUploadHandler;
+
+    private final DispatcherGateway mockDispatcherGateway =
+            TestingDispatcherGateway.newBuilder().build();
+
+    private Path jarDir;
+
+    @BeforeEach
+    void setUp(@TempDir File temporaryFolder) {
+        jarDir = temporaryFolder.toPath();
+        jarUploadHandler =
+                new JarUploadHandler(
+                        () -> CompletableFuture.completedFuture(mockDispatcherGateway),
+                        Duration.ofSeconds(10),
+                        Collections.emptyMap(),
+                        JarUploadHeaders.getInstance(),
+                        jarDir,
+                        Executors.directExecutor());
+    }
+
+    @Test
+    void testRejectNonJarFiles() throws Exception {
+        final Path uploadedFile = Files.createFile(jarDir.resolve("katrin.png"));
+        final HandlerRequest<EmptyRequestBody> request = createRequest(uploadedFile);
+
+        assertThatThrownBy(
+                        () -> jarUploadHandler.handleRequest(request, mockDispatcherGateway).get())
+                .satisfies(
+                        e -> {
+                            final Throwable throwable =
+                                    ExceptionUtils.stripCompletionException(e.getCause());
+                            assertThat(throwable).isInstanceOf(RestHandlerException.class);
+                            final RestHandlerException restHandlerException =
+                                    (RestHandlerException) throwable;
+                            assertThat(restHandlerException.getHttpResponseStatus())
+                                    .isEqualTo(HttpResponseStatus.BAD_REQUEST);
+                        });
+    }
+
+    @Test
+    void testUploadJar() throws Exception {
+        final Path uploadedFile = Files.createFile(jarDir.resolve("FooBazzleExample.jar"));
+        final HandlerRequest<EmptyRequestBody> request = createRequest(uploadedFile);
+
+        final JarUploadResponseBody jarUploadResponseBody =
+                jarUploadHandler.handleRequest(request, mockDispatcherGateway).get();
+        assertThat(jarUploadResponseBody.getStatus())
+                .isEqualTo(JarUploadResponseBody.UploadStatus.success);
+        final String returnedFileNameWithUUID = jarUploadResponseBody.getFilename();
+        assertThat(returnedFileNameWithUUID).contains("_");
+        final String returnedFileName =
+                returnedFileNameWithUUID.substring(returnedFileNameWithUUID.lastIndexOf("_") + 1);
+        assertThat(returnedFileName).isEqualTo(uploadedFile.getFileName().toString());
+    }
+
+    @Test
+    void testFailedUpload() {
+        final Path uploadedFile = jarDir.resolve("FooBazzleExample.jar");
+        final HandlerRequest<EmptyRequestBody> request = createRequest(uploadedFile);
+
+        assertThatThrownBy(
+                        () -> jarUploadHandler.handleRequest(request, mockDispatcherGateway).get())
+                .satisfies(
+                        e -> {
+                            final Throwable throwable =
+                                    ExceptionUtils.stripCompletionException(e.getCause());
+                            assertThat(throwable).isInstanceOf(RestHandlerException.class);
+                            final RestHandlerException restHandlerException =
+                                    (RestHandlerException) throwable;
+                            assertThat(restHandlerException.getMessage())
+                                    .contains("Could not move uploaded jar file");
+                            assertThat(restHandlerException.getHttpResponseStatus())
+                                    .isEqualTo(HttpResponseStatus.INTERNAL_SERVER_ERROR);
+                        });
+    }
+
+    private static HandlerRequest<EmptyRequestBody> createRequest(final Path uploadedFile) {
+        return HandlerRequest.create(
+                EmptyRequestBody.getInstance(),
+                EmptyMessageParameters.getInstance(),
+                Collections.singleton(uploadedFile.toFile()));
+    }
 }

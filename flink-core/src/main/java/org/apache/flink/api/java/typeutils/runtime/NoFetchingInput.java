@@ -18,9 +18,11 @@
 
 package org.apache.flink.api.java.typeutils.runtime;
 
+import org.apache.flink.annotation.Internal;
+
 import com.esotericsoftware.kryo.KryoException;
 import com.esotericsoftware.kryo.io.Input;
-import org.apache.flink.annotation.Internal;
+import com.esotericsoftware.kryo.io.KryoBufferUnderflowException;
 
 import java.io.EOFException;
 import java.io.IOException;
@@ -28,116 +30,135 @@ import java.io.InputStream;
 
 @Internal
 public class NoFetchingInput extends Input {
-	public NoFetchingInput(InputStream inputStream){
-		super(inputStream, 8);
-	}
+    public NoFetchingInput(InputStream inputStream) {
+        super(inputStream, 8);
+    }
 
-	@Override
-	public boolean eof(){
-		throw new UnsupportedOperationException("NoFetchingInput does not support EOF.");
-	}
+    @Override
+    public int read() throws KryoException {
+        require(1);
+        return buffer[position++] & 0xFF;
+    }
 
-	@Override
-	public int read() throws KryoException {
-		require(1);
-		return buffer[position++] & 0xFF;
-	}
+    @Override
+    public boolean canReadInt() throws KryoException {
+        throw new UnsupportedOperationException("NoFetchingInput cannot prefetch data.");
+    }
 
-	@Override
-	public boolean canReadInt() throws KryoException {
-		throw new UnsupportedOperationException("NoFetchingInput cannot prefetch data.");
-	}
+    @Override
+    public boolean canReadLong() throws KryoException {
+        throw new UnsupportedOperationException("NoFetchingInput cannot prefetch data.");
+    }
 
-	@Override
-	public boolean canReadLong() throws KryoException {
-		throw new UnsupportedOperationException("NoFetchingInput cannot prefetch data.");
-	}
+    /**
+     * Require makes sure that at least required number of bytes are kept in the buffer. If not,
+     * then it will load exactly the difference between required and currently available number of
+     * bytes. Thus, it will only load the data which is required and never prefetch data.
+     *
+     * @param required the number of bytes being available in the buffer
+     * @return The number of bytes remaining in the buffer, which will be at least <code>required
+     *     </code> bytes.
+     * @throws KryoException
+     */
+    @Override
+    protected int require(int required) throws KryoException {
+        // The main change between this and Kryo 5 Input.require is this will never read more bytes
+        // than required.
+        // There are also formatting changes to be compliant with the Flink project styling rules.
+        int remaining = limit - position;
+        if (remaining >= required) {
+            return remaining;
+        }
+        if (required > capacity) {
+            throw new KryoException(
+                    "Buffer too small: capacity: " + capacity + ", required: " + required);
+        }
 
-	/**
-	 * Require makes sure that at least required number of bytes are kept in the buffer. If not, then
-	 * it will load exactly the difference between required and currently available number of bytes.
-	 * Thus, it will only load the data which is required and never prefetch data.
-	 *
-	 * @param required the number of bytes being available in the buffer
-	 * @return the number of bytes remaining, which is equal to required
-	 * @throws KryoException
-	 */
-	@Override
-	protected int require(int required) throws KryoException {
-		if(required > capacity) {
-			throw new KryoException("Buffer too small: capacity: " + capacity + ", " +
-					"required: " + required);
-		}
+        int count;
+        // Try to fill the buffer.
+        if (remaining > 0) {
+            // Logical change 1 (from Kryo Input.require): "capacity - limit" -> "required - limit"
+            count = fill(buffer, limit, required - limit);
+            if (count == -1) {
+                throw new KryoBufferUnderflowException("Buffer underflow.");
+            }
+            remaining += count;
+            if (remaining >= required) {
+                limit += count;
+                return remaining;
+            }
+        }
 
-		position = 0;
-		int bytesRead = 0;
-		int count;
-		while(true){
-			count = fill(buffer, bytesRead, required - bytesRead);
+        // Was not enough, compact and try again.
+        System.arraycopy(buffer, position, buffer, 0, remaining);
+        total += position;
+        position = 0;
 
-			if(count == -1){
-				throw new KryoException(new EOFException("No more bytes left."));
-			}
+        do {
+            // Logical change 2 (from Kryo Input.require): "capacity - remaining" -> "required -
+            // remaining"
+            count = fill(buffer, remaining, required - remaining);
+            if (count == -1) {
+                throw new KryoBufferUnderflowException("Buffer underflow.");
+            }
+            remaining += count;
+        } while (remaining < required);
 
-			bytesRead += count;
-			if(bytesRead == required){
-				break;
-			}
-		}
-		limit = required;
-		return required;
-	}
+        limit = remaining;
+        return remaining;
+    }
 
-	@Override
-	public int read(byte[] bytes, int offset, int count) throws KryoException {
-		if(bytes == null){
-			throw new IllegalArgumentException("bytes cannot be null.");
-		}
+    @Override
+    public int read(byte[] bytes, int offset, int count) throws KryoException {
+        if (bytes == null) {
+            throw new IllegalArgumentException("bytes cannot be null.");
+        }
 
-		try {
-			return inputStream.read(bytes, offset, count);
-		}catch(IOException ex){
-			throw new KryoException(ex);
-		}
-	}
+        try {
+            return inputStream.read(bytes, offset, count);
+        } catch (IOException ex) {
+            throw new KryoException(ex);
+        }
+    }
 
-	@Override
-	public void skip(int count) throws KryoException {
-		try{
-			inputStream.skip(count);
-		}catch(IOException ex){
-			throw new KryoException(ex);
-		}
-	}
+    @Override
+    public void skip(int count) throws KryoException {
+        try {
+            inputStream.skip(count);
+        } catch (IOException ex) {
+            throw new KryoException(ex);
+        }
+    }
 
-	@Override
-	public void readBytes(byte[] bytes, int offset, int count) throws KryoException {
-		if(bytes == null){
-			throw new IllegalArgumentException("bytes cannot be null.");
-		}
+    @Override
+    public void readBytes(byte[] bytes, int offset, int count) throws KryoException {
+        if (bytes == null) {
+            throw new IllegalArgumentException("bytes cannot be null.");
+        }
 
-		try{
-			int bytesRead = 0;
-			int c;
+        if (count == 0) {
+            return;
+        }
 
-			while(true){
-				c = inputStream.read(bytes, offset+bytesRead, count-bytesRead);
+        try {
+            int bytesRead = 0;
+            int c;
 
-				if(c == -1){
-					throw new KryoException(new EOFException("No more bytes left."));
-				}
+            while (true) {
+                c = inputStream.read(bytes, offset + bytesRead, count - bytesRead);
 
-				bytesRead += c;
+                if (c == -1) {
+                    throw new KryoException(new EOFException("No more bytes left."));
+                }
 
-				if(bytesRead == count){
-					break;
-				}
-			}
-		}catch(IOException ex){
-			throw new KryoException(ex);
-		}
-	}
+                bytesRead += c;
 
-
+                if (bytesRead == count) {
+                    break;
+                }
+            }
+        } catch (IOException ex) {
+            throw new KryoException(ex);
+        }
+    }
 }
-

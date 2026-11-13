@@ -18,131 +18,295 @@
 
 package org.apache.flink.runtime.io.network.partition;
 
-import com.google.common.collect.HashBasedTable;
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Table;
-import org.apache.flink.runtime.executiongraph.ExecutionAttemptID;
-import org.apache.flink.runtime.jobgraph.IntermediateResultPartitionID;
+import org.apache.flink.annotation.VisibleForTesting;
+import org.apache.flink.runtime.shuffle.DefaultShuffleMetrics;
+import org.apache.flink.runtime.shuffle.ShuffleMetrics;
+import org.apache.flink.util.CollectionUtil;
+import org.apache.flink.util.concurrent.ScheduledExecutor;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.annotation.Nullable;
+import javax.annotation.concurrent.GuardedBy;
+
 import java.io.IOException;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 import static org.apache.flink.util.Preconditions.checkState;
 
 /**
- * The result partition manager keeps track of all currently produced/consumed partitions of a
- * task manager.
+ * The result partition manager keeps track of all currently produced/consumed partitions of a task
+ * manager.
  */
 public class ResultPartitionManager implements ResultPartitionProvider {
 
-	private static final Logger LOG = LoggerFactory.getLogger(ResultPartitionManager.class);
+    private static final Logger LOG = LoggerFactory.getLogger(ResultPartitionManager.class);
 
-	public final Table<ExecutionAttemptID, IntermediateResultPartitionID, ResultPartition>
-			registeredPartitions = HashBasedTable.create();
+    private final Map<ResultPartitionID, ResultPartition> registeredPartitions =
+            CollectionUtil.newHashMapWithExpectedSize(16);
 
-	private boolean isShutdown;
+    @GuardedBy("registeredPartitions")
+    private final Map<ResultPartitionID, PartitionRequestListenerManager> listenerManagers =
+            new HashMap<>();
 
-	public void registerResultPartition(ResultPartition partition) throws IOException {
-		synchronized (registeredPartitions) {
-			checkState(!isShutdown, "Result partition manager already shut down.");
+    @Nullable private ScheduledFuture<?> partitionListenerTimeoutChecker;
 
-			ResultPartitionID partitionId = partition.getPartitionId();
+    private final int partitionListenerTimeout;
 
-			ResultPartition previous = registeredPartitions.put(
-					partitionId.getProducerId(), partitionId.getPartitionId(), partition);
+    private boolean isShutdown;
 
-			if (previous != null) {
-				throw new IllegalStateException("Result partition already registered.");
-			}
+    @VisibleForTesting
+    public ResultPartitionManager() {
+        this(0, null);
+    }
 
-			LOG.debug("Registered {}.", partition);
-		}
-	}
+    public ResultPartitionManager(
+            int partitionListenerTimeout, ScheduledExecutor scheduledExecutor) {
+        this.partitionListenerTimeout = partitionListenerTimeout;
+        if (partitionListenerTimeout > 0 && scheduledExecutor != null) {
+            this.partitionListenerTimeoutChecker =
+                    scheduledExecutor.scheduleWithFixedDelay(
+                            this::checkRequestPartitionListeners,
+                            partitionListenerTimeout,
+                            partitionListenerTimeout,
+                            TimeUnit.MILLISECONDS);
+        }
+    }
 
-	@Override
-	public ResultSubpartitionView createSubpartitionView(
-			ResultPartitionID partitionId,
-			int subpartitionIndex,
-			BufferAvailabilityListener availabilityListener) throws IOException {
+    public void registerResultPartition(ResultPartition partition) throws IOException {
+        PartitionRequestListenerManager listenerManager;
+        synchronized (registeredPartitions) {
+            checkState(!isShutdown, "Result partition manager already shut down.");
 
-		synchronized (registeredPartitions) {
-			final ResultPartition partition = registeredPartitions.get(partitionId.getProducerId(),
-					partitionId.getPartitionId());
+            ResultPartition previous =
+                    registeredPartitions.put(partition.getPartitionId(), partition);
 
-			if (partition == null) {
-				throw new PartitionNotFoundException(partitionId);
-			}
+            if (previous != null) {
+                throw new IllegalStateException("Result partition already registered.");
+            }
 
-			LOG.debug("Requesting subpartition {} of {}.", subpartitionIndex, partition);
+            listenerManager = listenerManagers.remove(partition.getPartitionId());
+        }
+        if (listenerManager != null) {
+            for (PartitionRequestListener listener :
+                    listenerManager.getPartitionRequestListeners()) {
+                listener.notifyPartitionCreated(partition);
+            }
+        }
 
-			return partition.createSubpartitionView(subpartitionIndex, availabilityListener);
-		}
-	}
+        LOG.debug("Registered {}.", partition);
+    }
 
-	public void releasePartitionsProducedBy(ExecutionAttemptID executionId) {
-		releasePartitionsProducedBy(executionId, null);
-	}
+    @Override
+    public ResultSubpartitionView createSubpartitionView(
+            ResultPartitionID partitionId,
+            ResultSubpartitionIndexSet subpartitionIndexSet,
+            BufferAvailabilityListener availabilityListener)
+            throws IOException {
 
-	public void releasePartitionsProducedBy(ExecutionAttemptID executionId, Throwable cause) {
-		synchronized (registeredPartitions) {
-			final Map<IntermediateResultPartitionID, ResultPartition> partitions =
-					registeredPartitions.row(executionId);
+        final ResultSubpartitionView subpartitionView;
+        synchronized (registeredPartitions) {
+            final ResultPartition partition = registeredPartitions.get(partitionId);
 
-			for (ResultPartition partition : partitions.values()) {
-				partition.release(cause);
-			}
+            if (partition == null) {
+                throw new PartitionNotFoundException(partitionId);
+            }
 
-			for (IntermediateResultPartitionID partitionId : ImmutableList
-					.copyOf(partitions.keySet())) {
+            LOG.debug("Requesting subpartitions {} of {}.", subpartitionIndexSet, partition);
 
-				registeredPartitions.remove(executionId, partitionId);
-			}
+            subpartitionView =
+                    partition.createSubpartitionView(subpartitionIndexSet, availabilityListener);
+        }
 
-			LOG.debug("Released all partitions produced by {}.", executionId);
-		}
-	}
+        return subpartitionView;
+    }
 
-	public void shutdown() {
-		synchronized (registeredPartitions) {
+    @Override
+    public Optional<ResultSubpartitionView> createSubpartitionViewOrRegisterListener(
+            ResultPartitionID partitionId,
+            ResultSubpartitionIndexSet subpartitionIndexSet,
+            BufferAvailabilityListener availabilityListener,
+            PartitionRequestListener partitionRequestListener)
+            throws IOException {
 
-			LOG.debug("Releasing {} partitions because of shutdown.",
-					registeredPartitions.values().size());
+        final ResultSubpartitionView subpartitionView;
+        synchronized (registeredPartitions) {
+            final ResultPartition partition = registeredPartitions.get(partitionId);
 
-			for (ResultPartition partition : registeredPartitions.values()) {
-				partition.release();
-			}
+            if (partition == null) {
+                listenerManagers
+                        .computeIfAbsent(partitionId, key -> new PartitionRequestListenerManager())
+                        .registerListener(partitionRequestListener);
+                subpartitionView = null;
+            } else {
 
-			registeredPartitions.clear();
+                LOG.debug("Requesting subpartitions {} of {}.", subpartitionIndexSet, partition);
 
-			isShutdown = true;
+                subpartitionView =
+                        partition.createSubpartitionView(
+                                subpartitionIndexSet, availabilityListener);
+            }
+        }
 
-			LOG.debug("Successful shutdown.");
-		}
-	}
+        return subpartitionView == null ? Optional.empty() : Optional.of(subpartitionView);
+    }
 
-	// ------------------------------------------------------------------------
-	// Notifications
-	// ------------------------------------------------------------------------
+    @Override
+    public void releasePartitionRequestListener(PartitionRequestListener listener) {
+        synchronized (registeredPartitions) {
+            PartitionRequestListenerManager listenerManager =
+                    listenerManagers.get(listener.getResultPartitionId());
+            if (listenerManager != null) {
+                listenerManager.remove(listener.getReceiverId());
+                if (listenerManager.isEmpty()) {
+                    listenerManagers.remove(listener.getResultPartitionId());
+                }
+            }
+        }
+    }
 
-	void onConsumedPartition(ResultPartition partition) {
-		final ResultPartition previous;
+    public void releasePartition(ResultPartitionID partitionId, Throwable cause) {
+        PartitionRequestListenerManager listenerManager;
+        synchronized (registeredPartitions) {
+            ResultPartition resultPartition = registeredPartitions.remove(partitionId);
+            if (resultPartition != null) {
+                resultPartition.release(cause);
+                LOG.debug(
+                        "Released partition {} produced by {}.",
+                        partitionId.getPartitionId(),
+                        partitionId.getProducerId());
+            }
+            listenerManager = listenerManagers.remove(partitionId);
+        }
+        if (listenerManager != null && !listenerManager.isEmpty()) {
+            for (PartitionRequestListener listener :
+                    listenerManager.getPartitionRequestListeners()) {
+                listener.notifyPartitionCreatedTimeout();
+            }
+        }
+    }
 
-		LOG.debug("Received consume notification from {}.", partition);
+    public void shutdown() {
+        synchronized (registeredPartitions) {
+            LOG.debug(
+                    "Releasing {} partitions because of shutdown.",
+                    registeredPartitions.values().size());
 
-		synchronized (registeredPartitions) {
-			ResultPartitionID partitionId = partition.getPartitionId();
+            for (ResultPartition partition : registeredPartitions.values()) {
+                partition.release();
+            }
 
-			previous = registeredPartitions.remove(partitionId.getProducerId(),
-					partitionId.getPartitionId());
-		}
+            registeredPartitions.clear();
 
-		// Release the partition if it was successfully removed
-		if (partition == previous) {
-			partition.release();
+            releaseListenerManagers();
 
-			LOG.debug("Released {}.", partition);
-		}
-	}
+            // stop the timeout checks for the TaskManagers
+            if (partitionListenerTimeoutChecker != null) {
+                partitionListenerTimeoutChecker.cancel(false);
+                partitionListenerTimeoutChecker = null;
+            }
+
+            isShutdown = true;
+
+            LOG.debug("Successful shutdown.");
+        }
+    }
+
+    private void releaseListenerManagers() {
+        for (PartitionRequestListenerManager listenerManager : listenerManagers.values()) {
+            for (PartitionRequestListener listener :
+                    listenerManager.getPartitionRequestListeners()) {
+                listener.notifyPartitionCreatedTimeout();
+            }
+        }
+        listenerManagers.clear();
+    }
+
+    /** Check whether the partition request listener is timeout. */
+    private void checkRequestPartitionListeners() {
+        List<PartitionRequestListener> timeoutPartitionRequestListeners = new LinkedList<>();
+        synchronized (registeredPartitions) {
+            if (isShutdown) {
+                return;
+            }
+            long now = System.currentTimeMillis();
+            Iterator<Map.Entry<ResultPartitionID, PartitionRequestListenerManager>> iterator =
+                    listenerManagers.entrySet().iterator();
+            while (iterator.hasNext()) {
+                Map.Entry<ResultPartitionID, PartitionRequestListenerManager> entry =
+                        iterator.next();
+                PartitionRequestListenerManager partitionRequestListeners = entry.getValue();
+                partitionRequestListeners.removeExpiration(
+                        now, partitionListenerTimeout, timeoutPartitionRequestListeners);
+                if (partitionRequestListeners.isEmpty()) {
+                    iterator.remove();
+                }
+            }
+        }
+        for (PartitionRequestListener partitionRequestListener : timeoutPartitionRequestListeners) {
+            partitionRequestListener.notifyPartitionCreatedTimeout();
+        }
+    }
+
+    @VisibleForTesting
+    public Map<ResultPartitionID, PartitionRequestListenerManager> getListenerManagers() {
+        return listenerManagers;
+    }
+
+    // ------------------------------------------------------------------------
+    // Notifications
+    // ------------------------------------------------------------------------
+
+    void onConsumedPartition(ResultPartition partition) {
+        LOG.debug("Received consume notification from {}.", partition);
+
+        synchronized (registeredPartitions) {
+            final ResultPartition previous =
+                    registeredPartitions.remove(partition.getPartitionId());
+            // Release the partition if it was successfully removed
+            if (partition == previous) {
+                partition.release();
+                ResultPartitionID partitionId = partition.getPartitionId();
+                LOG.debug(
+                        "Released partition {} produced by {}.",
+                        partitionId.getPartitionId(),
+                        partitionId.getProducerId());
+            }
+            PartitionRequestListenerManager listenerManager =
+                    listenerManagers.remove(partition.getPartitionId());
+            checkState(
+                    listenerManager == null || listenerManager.isEmpty(),
+                    "The partition request listeners is not empty for "
+                            + partition.getPartitionId());
+        }
+    }
+
+    public Collection<ResultPartitionID> getUnreleasedPartitions() {
+        synchronized (registeredPartitions) {
+            return registeredPartitions.keySet();
+        }
+    }
+
+    public Optional<ShuffleMetrics> getMetricsOfPartition(ResultPartitionID partitionId) {
+        synchronized (registeredPartitions) {
+            final ResultPartition partition = registeredPartitions.get(partitionId);
+
+            if (partition == null) {
+                return Optional.empty();
+            }
+
+            return Optional.of(
+                    new DefaultShuffleMetrics(
+                            partition.getResultPartitionBytes().createSnapshot()));
+        }
+    }
 }

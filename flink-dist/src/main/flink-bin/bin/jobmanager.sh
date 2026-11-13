@@ -18,12 +18,23 @@
 ################################################################################
 
 # Start/stop a Flink JobManager.
-USAGE="Usage: jobmanager.sh ((start|start-foreground) (local|cluster) [host] [webui-port])|stop|stop-all"
+USAGE="Usage: jobmanager.sh ((start|start-foreground) [args])|stop|stop-all"
 
 STARTSTOP=$1
-EXECUTIONMODE=$2
-HOST=$3 # optional when starting multiple instances
-WEBUIPORT=$4 # optional when starting multiple instances
+
+if [ -z $2 ] || [[ $2 == "-D" ]]; then
+    # start [-D ...]
+    args=("${@:2}")
+elif [ -z $3 ] || [[ $3 == "-D" ]]; then
+    # legacy path: start <host> [-D ...]
+    HOST=$2
+    args=("${@:3}")
+else
+    # legacy path: start <host> <port> [-D ...]
+    HOST=$2
+    WEBUIPORT=$3
+    args=("${@:4}")
+fi
 
 if [[ $STARTSTOP != "start" ]] && [[ $STARTSTOP != "start-foreground" ]] && [[ $STARTSTOP != "stop" ]] && [[ $STARTSTOP != "stop-all" ]]; then
   echo $USAGE
@@ -35,48 +46,31 @@ bin=`cd "$bin"; pwd`
 
 . "$bin"/config.sh
 
+ENTRYPOINT=standalonesession
+
 if [[ $STARTSTOP == "start" ]] || [[ $STARTSTOP == "start-foreground" ]]; then
-    if [ -z $EXECUTIONMODE ]; then
-        echo "Missing execution mode (local|cluster) argument. $USAGE."
-        exit 1
-    fi
-
-    if [[ ! ${FLINK_JM_HEAP} =~ $IS_NUMBER ]] || [[ "${FLINK_JM_HEAP}" -lt "0" ]]; then
-        echo "[ERROR] Configured JobManager memory size is not a valid value. Please set '${KEY_JOBM_MEM_SIZE}' in ${FLINK_CONF_FILE}."
-        exit 1
-    fi
-
-    if [ "$EXECUTIONMODE" = "local" ]; then
-        if [[ ! ${FLINK_TM_HEAP} =~ $IS_NUMBER ]] || [[ "${FLINK_TM_HEAP}" -lt "0" ]]; then
-            echo "[ERROR] Configured TaskManager memory size is not a valid value. Please set ${KEY_TASKM_MEM_SIZE} in ${FLINK_CONF_FILE}."
-            exit 1
-        fi
-
-        FLINK_JM_HEAP=`expr $FLINK_JM_HEAP + $FLINK_TM_HEAP`
-    fi
-
-    if [ "${FLINK_JM_HEAP}" -gt "0" ]; then
-        export JVM_ARGS="$JVM_ARGS -Xms"$FLINK_JM_HEAP"m -Xmx"$FLINK_JM_HEAP"m"
-    fi
-
     # Add JobManager-specific JVM options
     export FLINK_ENV_JAVA_OPTS="${FLINK_ENV_JAVA_OPTS} ${FLINK_ENV_JAVA_OPTS_JM}"
+    parseJmArgsAndExportLogs "${args[@]}"
 
-    # Startup parameters
-    args=("--configDir" "${FLINK_CONF_DIR}" "--executionMode" "${EXECUTIONMODE}")
+    args=("--configDir" "${FLINK_CONF_DIR}" "${args[@]}")
     if [ ! -z $HOST ]; then
-        args+=("--host")
-        args+=("${HOST}")
+        args+=("-D")
+        args+=("jobmanager.rpc.address=${HOST}")
     fi
 
     if [ ! -z $WEBUIPORT ]; then
-        args+=("--webui-port")
-        args+=("${WEBUIPORT}")
+        args+=("-D")
+        args+=("rest.port=${WEBUIPORT}")
+    fi
+
+    if [ ! -z "${DYNAMIC_PARAMETERS}" ]; then
+        args=(${DYNAMIC_PARAMETERS[@]} "${args[@]}")
     fi
 fi
 
 if [[ $STARTSTOP == "start-foreground" ]]; then
-    exec "${FLINK_BIN_DIR}"/flink-console.sh jobmanager "${args[@]}"
+    exec "${FLINK_BIN_DIR}"/flink-console.sh $ENTRYPOINT "${args[@]}"
 else
-    "${FLINK_BIN_DIR}"/flink-daemon.sh $STARTSTOP jobmanager "${args[@]}"
+    "${FLINK_BIN_DIR}"/flink-daemon.sh $STARTSTOP $ENTRYPOINT "${args[@]}"
 fi

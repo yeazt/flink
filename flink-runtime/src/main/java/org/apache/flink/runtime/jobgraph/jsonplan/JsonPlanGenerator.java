@@ -18,124 +18,185 @@
 
 package org.apache.flink.runtime.jobgraph.jsonplan;
 
-import com.fasterxml.jackson.core.JsonFactory;
-import com.fasterxml.jackson.core.JsonGenerator;
-
-import org.apache.commons.lang3.StringEscapeUtils;
+import org.apache.flink.annotation.Internal;
+import org.apache.flink.api.common.JobID;
 import org.apache.flink.runtime.jobgraph.JobEdge;
 import org.apache.flink.runtime.jobgraph.JobGraph;
+import org.apache.flink.runtime.jobgraph.JobType;
 import org.apache.flink.runtime.jobgraph.JobVertex;
+import org.apache.flink.runtime.jobgraph.JobVertexID;
+import org.apache.flink.runtime.rest.messages.JobPlanInfo;
+import org.apache.flink.runtime.scheduler.adaptive.allocator.VertexParallelism;
+import org.apache.flink.streaming.api.graph.StreamEdge;
+import org.apache.flink.streaming.api.graph.StreamGraph;
+import org.apache.flink.streaming.api.graph.StreamNode;
+
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.core.JsonFactory;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.core.JsonGenerator;
+
+import org.apache.commons.text.StringEscapeUtils;
 
 import java.io.StringWriter;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 
-
+@Internal
 public class JsonPlanGenerator {
-	
-	private static final String NOT_SET = "";
-	private static final String EMPTY = "{}";
-	
-	public static String generatePlan(JobGraph jg) {
-		try {
-			final StringWriter writer = new StringWriter(1024);
 
-			final JsonFactory factory = new JsonFactory();
-			final JsonGenerator gen = factory.createGenerator(writer);
-			
-			// start of everything
-			gen.writeStartObject();
-			gen.writeStringField("jid", jg.getJobID().toString());
-			gen.writeStringField("name", jg.getName());
-			gen.writeArrayFieldStart("nodes");
-			
-			// info per vertex
-			for (JobVertex vertex : jg.getVertices()) {
-				
-				String operator = vertex.getOperatorName() != null ? 
-						vertex.getOperatorName() : NOT_SET;
+    private static final String NOT_SET = "";
+    private static final String EMPTY = "{}";
 
-				String operatorDescr = vertex.getOperatorDescription() != null ?
-						vertex.getOperatorDescription() : NOT_SET;
-				
-				String optimizerProps = vertex.getResultOptimizerProperties() != null ?
-						vertex.getResultOptimizerProperties() : EMPTY;
-				
-				String description = vertex.getOperatorPrettyName() != null ?
-						vertex.getOperatorPrettyName() : vertex.getName();
+    public static JobPlanInfo.Plan generatePlan(JobGraph jg) {
+        return generatePlan(
+                jg.getJobID(),
+                jg.getName(),
+                jg.getJobType(),
+                jg.getVertices(),
+                VertexParallelism.empty());
+    }
 
-				// make sure the encoding is HTML pretty
-				description = StringEscapeUtils.escapeHtml4(description);
-				description = description.replace("\n", "<br/>");
-				description = description.replace("\\", "&#92;");
-				
-				operatorDescr = StringEscapeUtils.escapeHtml4(operatorDescr);
-				operatorDescr = operatorDescr.replace("\n", "<br/>");
-				
-				gen.writeStartObject();
-				
-				// write the core properties
-				gen.writeStringField("id", vertex.getID().toString());
-				gen.writeNumberField("parallelism", vertex.getParallelism());
-				gen.writeStringField("operator", operator);
-				gen.writeStringField("operator_strategy", operatorDescr);
-				gen.writeStringField("description", description);
-				
-				if (!vertex.isInputVertex()) {
-					// write the input edge properties
-					gen.writeArrayFieldStart("inputs");
-					
-					List<JobEdge> inputs = vertex.getInputs();
-					for (int inputNum = 0; inputNum < inputs.size(); inputNum++) {
-						JobEdge edge = inputs.get(inputNum);
-						if (edge.getSource() == null) {
-							continue;
-						}
-						
-						JobVertex predecessor = edge.getSource().getProducer();
+    public static JobPlanInfo.Plan generatePlan(
+            JobID jobID,
+            String jobName,
+            JobType jobType,
+            Iterable<JobVertex> vertices,
+            VertexParallelism vertexParallelism) {
+        try {
+            Collection<JobPlanInfo.Plan.Node> nodes = new ArrayList<>();
 
-						String shipStrategy = edge.getShipStrategyName();
-						String preProcessingOperation = edge.getPreProcessingOperationName();
-						String operatorLevelCaching = edge.getOperatorLevelCachingDescription();
-						
-						gen.writeStartObject();
-						gen.writeNumberField("num", inputNum);
-						gen.writeStringField("id", predecessor.getID().toString());
+            // info per vertex
+            for (JobVertex vertex : vertices) {
 
-						if (shipStrategy != null) {
-							gen.writeStringField("ship_strategy", shipStrategy);
-						}
-						if (preProcessingOperation != null) {
-							gen.writeStringField("local_strategy", preProcessingOperation);
-						}
-						if (operatorLevelCaching != null) {
-							gen.writeStringField("caching", operatorLevelCaching);
-						}
-						
-						gen.writeStringField("exchange", edge.getSource().getResultType().name().toLowerCase());
-						
-						gen.writeEndObject();
-					}
-					
-					gen.writeEndArray();
-				}
+                String operator =
+                        vertex.getOperatorName() != null ? vertex.getOperatorName() : NOT_SET;
 
-				// write the optimizer properties
-				gen.writeFieldName("optimizer_properties");
-				gen.writeRawValue(optimizerProps);
-				
-				gen.writeEndObject();
-			}
+                String operatorDescr =
+                        vertex.getOperatorDescription() != null
+                                ? vertex.getOperatorDescription()
+                                : NOT_SET;
 
-			// end of everything
-			gen.writeEndArray();
-			gen.writeEndObject();
-			
-			gen.close();
-			
-			return writer.toString();
-		}
-		catch (Exception e) {
-			throw new RuntimeException("Failed to generate plan", e);
-		}
-	}
+                String optimizerProps =
+                        vertex.getResultOptimizerProperties() != null
+                                ? vertex.getResultOptimizerProperties()
+                                : EMPTY;
+
+                String description =
+                        vertex.getOperatorPrettyName() != null
+                                ? vertex.getOperatorPrettyName()
+                                : vertex.getName();
+
+                // make sure the encoding is HTML pretty
+                description = StringEscapeUtils.escapeHtml4(description);
+                description = description.replace("\n", "<br/>");
+                description = description.replace("\\", "&#92;");
+
+                operatorDescr = StringEscapeUtils.escapeHtml4(operatorDescr);
+                operatorDescr = operatorDescr.replace("\n", "<br/>");
+
+                JobVertexID vertexID = vertex.getID();
+                long parallelism =
+                        vertexParallelism
+                                .getParallelismOptional(vertexID)
+                                .orElse(vertex.getParallelism());
+                Collection<JobPlanInfo.Plan.Node.Input> inputs = new ArrayList<>();
+
+                if (!vertex.isInputVertex()) {
+                    for (int inputNum = 0; inputNum < vertex.getInputs().size(); inputNum++) {
+                        JobEdge edge = vertex.getInputs().get(inputNum);
+                        if (edge.getSource() == null) {
+                            continue;
+                        }
+                        JobVertex predecessor = edge.getSource().getProducer();
+                        if (predecessor == null || predecessor.getID() == null) {
+                            continue;
+                        }
+                        String inputId = predecessor.getID().toString();
+
+                        if (edge.getSource().getResultType() == null
+                                || edge.getSource().getResultType().name() == null) {
+                            continue;
+                        }
+                        String exchange = edge.getSource().getResultType().name().toLowerCase();
+                        String shipStrategy = edge.getShipStrategyName();
+                        String preProcessingOperation = edge.getPreProcessingOperationName();
+                        String operatorLevelCaching = edge.getOperatorLevelCachingDescription();
+
+                        inputs.add(
+                                new JobPlanInfo.Plan.Node.Input(
+                                        inputId,
+                                        inputNum,
+                                        exchange,
+                                        shipStrategy,
+                                        preProcessingOperation,
+                                        operatorLevelCaching));
+                    }
+                }
+                nodes.add(
+                        new JobPlanInfo.Plan.Node(
+                                vertexID.toString(),
+                                operator,
+                                parallelism,
+                                operatorDescr,
+                                description,
+                                new JobPlanInfo.RawJson(optimizerProps),
+                                inputs));
+            }
+
+            return new JobPlanInfo.Plan(jobID.toString(), jobName, jobType.name(), nodes);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to generate plan", e);
+        }
+    }
+
+    public static String generateStreamGraphJson(
+            StreamGraph sg, Map<Integer, JobVertexID> jobVertexIdMap) {
+        try (final StringWriter writer = new StringWriter(1024)) {
+            try (final JsonGenerator gen = new JsonFactory().createGenerator(writer)) {
+                // start of everything
+                gen.writeStartObject();
+
+                gen.writeArrayFieldStart("nodes");
+
+                // info per vertex
+                for (StreamNode node : sg.getStreamNodes()) {
+                    gen.writeStartObject();
+                    gen.writeStringField("id", String.valueOf(node.getId()));
+                    gen.writeNumberField("parallelism", node.getParallelism());
+                    gen.writeStringField("operator", node.getOperatorName());
+                    gen.writeStringField("description", node.getOperatorDescription());
+                    if (jobVertexIdMap.containsKey(node.getId())) {
+                        gen.writeStringField(
+                                "job_vertex_id", jobVertexIdMap.get(node.getId()).toString());
+                    }
+
+                    // write the input edge properties
+                    gen.writeArrayFieldStart("inputs");
+
+                    List<StreamEdge> inEdges = node.getInEdges();
+                    for (int inputNum = 0; inputNum < inEdges.size(); inputNum++) {
+                        StreamEdge edge = inEdges.get(inputNum);
+                        gen.writeStartObject();
+                        gen.writeNumberField("num", inputNum);
+                        gen.writeStringField("id", String.valueOf(edge.getSourceId()));
+                        gen.writeStringField("ship_strategy", edge.getPartitioner().toString());
+                        gen.writeStringField("exchange", edge.getExchangeMode().name());
+                        gen.writeEndObject();
+                    }
+
+                    gen.writeEndArray();
+
+                    gen.writeEndObject();
+                }
+
+                // end of everything
+                gen.writeEndArray();
+                gen.writeEndObject();
+            }
+            return writer.toString();
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to generate json stream plan", e);
+        }
+    }
 }

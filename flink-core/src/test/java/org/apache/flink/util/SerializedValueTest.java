@@ -19,54 +19,58 @@
 package org.apache.flink.util;
 
 import org.apache.flink.core.testutils.CommonTestUtils;
-import org.junit.Test;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.fail;
+import org.junit.jupiter.api.Test;
 
-public class SerializedValueTest {
+import java.util.Arrays;
 
-	@Test
-	public void testSimpleValue() {
-		try {
-			final String value = "teststring";
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-			SerializedValue<String> v = new SerializedValue<String>(value);
-			SerializedValue<String> copy = CommonTestUtils.createCopySerializable(v);
+/** Tests for the {@link SerializedValue}. */
+class SerializedValueTest {
 
-			assertEquals(value, v.deserializeValue(getClass().getClassLoader()));
-			assertEquals(value, copy.deserializeValue(getClass().getClassLoader()));
+    @Test
+    void testSimpleValue() throws Exception {
+        final String value = "teststring";
 
-			assertEquals(v, copy);
-			assertEquals(v.hashCode(), copy.hashCode());
+        SerializedValue<String> v = new SerializedValue<>(value);
+        SerializedValue<String> copy = CommonTestUtils.createCopySerializable(v);
 
-			assertNotNull(v.toString());
-			assertNotNull(copy.toString());
+        assertThat(v.deserializeValue(getClass().getClassLoader())).isEqualTo(value);
+        assertThat(copy.deserializeValue(getClass().getClassLoader())).isEqualTo(value);
 
-		}
-		catch (Exception e) {
-			e.printStackTrace();
-			fail(e.getMessage());
-		}
-	}
+        assertThat(copy).isEqualTo(v);
+        assertThat(copy).hasSameHashCodeAs(v);
 
-	@Test
-	public void testNullValue() {
-		try {
-			SerializedValue<Object> v = new SerializedValue<Object>(null);
-			SerializedValue<Object> copy = CommonTestUtils.createCopySerializable(v);
+        assertThat(v.toString()).isNotNull();
+        assertThat(copy.toString()).isNotNull();
 
-			assertNull(copy.deserializeValue(getClass().getClassLoader()));
+        assertThat(v.getByteArray()).isNotEmpty();
+        assertThat(copy.getByteArray()).isEqualTo(v.getByteArray());
 
-			assertEquals(v, copy);
-			assertEquals(v.hashCode(), copy.hashCode());
-			assertEquals(v.toString(), copy.toString());
-		}
-		catch (Exception e) {
-			e.printStackTrace();
-			fail(e.getMessage());
-		}
-	}
+        byte[] bytes = v.getByteArray();
+        SerializedValue<String> saved =
+                SerializedValue.fromBytes(Arrays.copyOf(bytes, bytes.length));
+        assertThat(saved).isEqualTo(v);
+        assertThat(saved.getByteArray()).isEqualTo(v.getByteArray());
+    }
+
+    @Test
+    void testNullValue() {
+        assertThatThrownBy(() -> new SerializedValue<>(null))
+                .isInstanceOf(NullPointerException.class);
+    }
+
+    @Test
+    void testFromNullBytes() {
+        assertThatThrownBy(() -> SerializedValue.fromBytes(null))
+                .isInstanceOf(NullPointerException.class);
+    }
+
+    @Test
+    void testFromEmptyBytes() {
+        assertThatThrownBy(() -> SerializedValue.fromBytes(new byte[0]))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
 }

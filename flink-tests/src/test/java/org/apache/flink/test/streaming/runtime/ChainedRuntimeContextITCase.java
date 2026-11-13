@@ -17,64 +17,58 @@
 
 package org.apache.flink.test.streaming.runtime;
 
+import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.common.functions.RichMapFunction;
 import org.apache.flink.api.common.functions.RuntimeContext;
-import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.api.functions.sink.DiscardingSink;
-import org.apache.flink.streaming.api.functions.source.RichParallelSourceFunction;
-import org.apache.flink.streaming.util.StreamingMultipleProgramsTestBase;
+import org.apache.flink.streaming.api.functions.sink.v2.DiscardingSink;
+import org.apache.flink.streaming.api.functions.source.legacy.RichParallelSourceFunction;
+import org.apache.flink.test.util.AbstractTestBase;
 
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
-import static org.junit.Assert.assertNotEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
-@SuppressWarnings("serial")
-public class ChainedRuntimeContextITCase extends StreamingMultipleProgramsTestBase {
-	private static RuntimeContext srcContext;
-	private static RuntimeContext mapContext;
+/** Test creation of context for chained streaming operators. */
+class ChainedRuntimeContextITCase extends AbstractTestBase {
+    private static RuntimeContext srcContext;
+    private static RuntimeContext mapContext;
 
-	@Test
-	public void test() throws Exception {
-		StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-		env.setParallelism(1);
+    @Test
+    void test() throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
 
-		env.addSource(new TestSource()).map(new TestMap()).addSink(new DiscardingSink<Integer>());
-		env.execute();
+        env.addSource(new TestSource()).map(new TestMap()).sinkTo(new DiscardingSink<>());
+        env.execute();
 
-		assertNotEquals(srcContext, mapContext);
+        assertThat(mapContext).isNotEqualTo(srcContext);
+    }
 
-	}
+    private static class TestSource extends RichParallelSourceFunction<Integer> {
 
-	private static class TestSource extends RichParallelSourceFunction<Integer> {
+        @Override
+        public void run(SourceContext<Integer> ctx) throws Exception {}
 
-		@Override
-		public void run(SourceContext<Integer> ctx) throws Exception {
-		}
+        @Override
+        public void cancel() {}
 
-		@Override
-		public void cancel() {
-		}
+        @Override
+        public void open(OpenContext openContext) {
+            srcContext = getRuntimeContext();
+        }
+    }
 
-		@Override
-		public void open(Configuration c) {
-			srcContext = getRuntimeContext();
-		}
+    private static class TestMap extends RichMapFunction<Integer, Integer> {
 
-	}
+        @Override
+        public Integer map(Integer value) throws Exception {
+            return value;
+        }
 
-	private static class TestMap extends RichMapFunction<Integer, Integer> {
-
-		@Override
-		public Integer map(Integer value) throws Exception {
-			return value;
-		}
-
-		@Override
-		public void open(Configuration c) {
-			mapContext = getRuntimeContext();
-		}
-
-	}
-
+        @Override
+        public void open(OpenContext openContext) {
+            mapContext = getRuntimeContext();
+        }
+    }
 }

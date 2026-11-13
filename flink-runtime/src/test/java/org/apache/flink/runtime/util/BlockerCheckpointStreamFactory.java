@@ -21,126 +21,82 @@ package org.apache.flink.runtime.util;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.core.testutils.OneShotLatch;
+import org.apache.flink.runtime.state.CheckpointStateOutputStream;
 import org.apache.flink.runtime.state.CheckpointStreamFactory;
+import org.apache.flink.runtime.state.CheckpointedStateScope;
+import org.apache.flink.runtime.state.StreamStateHandle;
 import org.apache.flink.runtime.state.memory.MemCheckpointStreamFactory;
 
 import java.io.IOException;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 
-/**
- * {@link CheckpointStreamFactory} for tests that allows for testing cancellation in async IO
- */
+/** {@link CheckpointStreamFactory} for tests that allows for testing cancellation in async IO. */
 @VisibleForTesting
 @Internal
 public class BlockerCheckpointStreamFactory implements CheckpointStreamFactory {
 
-	private final int maxSize;
-	private volatile int afterNumberInvocations;
-	private volatile OneShotLatch blocker;
-	private volatile OneShotLatch waiter;
+    protected final int maxSize;
+    protected volatile int afterNumberInvocations;
+    protected volatile OneShotLatch blocker;
+    protected volatile OneShotLatch waiter;
 
-	MemCheckpointStreamFactory.MemoryCheckpointOutputStream lastCreatedStream;
+    protected final Set<BlockingCheckpointOutputStream> allCreatedStreams;
 
-	public MemCheckpointStreamFactory.MemoryCheckpointOutputStream getLastCreatedStream() {
-		return lastCreatedStream;
-	}
+    public Set<BlockingCheckpointOutputStream> getAllCreatedStreams() {
+        return allCreatedStreams;
+    }
 
-	public BlockerCheckpointStreamFactory(int maxSize) {
-		this.maxSize = maxSize;
-	}
+    public BlockerCheckpointStreamFactory(int maxSize) {
+        this.maxSize = maxSize;
+        this.allCreatedStreams = new HashSet<>();
+    }
 
-	public void setAfterNumberInvocations(int afterNumberInvocations) {
-		this.afterNumberInvocations = afterNumberInvocations;
-	}
+    public void setAfterNumberInvocations(int afterNumberInvocations) {
+        this.afterNumberInvocations = afterNumberInvocations;
+    }
 
-	public void setBlockerLatch(OneShotLatch latch) {
-		this.blocker = latch;
-	}
+    public void setBlockerLatch(OneShotLatch latch) {
+        this.blocker = latch;
+    }
 
-	public void setWaiterLatch(OneShotLatch latch) {
-		this.waiter = latch;
-	}
+    public void setWaiterLatch(OneShotLatch latch) {
+        this.waiter = latch;
+    }
 
-	@Override
-	public MemCheckpointStreamFactory.MemoryCheckpointOutputStream createCheckpointStateOutputStream(long checkpointID, long timestamp) throws Exception {
-		this.lastCreatedStream = new MemCheckpointStreamFactory.MemoryCheckpointOutputStream(maxSize) {
+    public OneShotLatch getBlockerLatch() {
+        return blocker;
+    }
 
-			private int afterNInvocations = afterNumberInvocations;
-			private final OneShotLatch streamBlocker = blocker;
-			private final OneShotLatch streamWaiter = waiter;
+    public OneShotLatch getWaiterLatch() {
+        return waiter;
+    }
 
-			@Override
-			public void write(int b) throws IOException {
+    @Override
+    public CheckpointStateOutputStream createCheckpointStateOutputStream(
+            CheckpointedStateScope scope) throws IOException {
 
-				unblockWaiter();
+        BlockingCheckpointOutputStream blockingStream =
+                new BlockingCheckpointOutputStream(
+                        new MemCheckpointStreamFactory.MemoryCheckpointOutputStream(maxSize),
+                        waiter,
+                        blocker,
+                        afterNumberInvocations);
 
-				if (afterNInvocations > 0) {
-					--afterNInvocations;
-				} else {
-					awaitBlocker();
-				}
+        allCreatedStreams.add(blockingStream);
 
-				try {
-					super.write(b);
-				} catch (IOException ex) {
-					unblockWaiter();
-					throw ex;
-				}
+        return blockingStream;
+    }
 
-				if (0 == afterNInvocations) {
-					unblockWaiter();
-				}
+    @Override
+    public boolean canFastDuplicate(StreamStateHandle stateHandle, CheckpointedStateScope scope) {
+        return false;
+    }
 
-				// We also check for close here, in case the underlying stream does not do this
-				if (isClosed()) {
-					throw new IOException("Stream closed.");
-				}
-			}
-
-			//We override this to ensure that writes go through the blocking #write(int) method!
-			@Override
-			public void write(byte[] b, int off, int len) throws IOException {
-				for (int i = 0; i < len; i++) {
-					write(b[off + i]);
-				}
-			}
-
-			@Override
-			public void close() {
-				super.close();
-				// trigger all the latches, essentially all blocking ops on the stream should resume after close.
-				unblockAll();
-			}
-
-			private void unblockWaiter() {
-				if (null != streamWaiter) {
-					streamWaiter.trigger();
-				}
-			}
-
-			private void awaitBlocker() {
-				if (null != streamBlocker) {
-					try {
-						streamBlocker.await();
-					} catch (InterruptedException ignored) {
-					}
-				}
-			}
-
-			private void unblockAll() {
-				if (null != streamWaiter) {
-					streamWaiter.trigger();
-				}
-				if (null != streamBlocker) {
-					streamBlocker.trigger();
-				}
-			}
-		};
-
-		return lastCreatedStream;
-	}
-
-	@Override
-	public void close() throws Exception {
-
-	}
+    @Override
+    public List<StreamStateHandle> duplicate(
+            List<StreamStateHandle> stateHandles, CheckpointedStateScope scope) throws IOException {
+        throw new UnsupportedOperationException();
+    }
 }

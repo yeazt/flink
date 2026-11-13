@@ -15,53 +15,84 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.flink.runtime.state;
 
-import org.apache.flink.core.fs.FSDataOutputStream;
+import org.apache.flink.runtime.checkpoint.filemerging.FileMergingSnapshotManager;
 
 import java.io.IOException;
-import java.io.OutputStream;
+import java.util.Collection;
+import java.util.List;
 
+/**
+ * A factory for checkpoint output streams, which are used to persist data for checkpoints.
+ *
+ * <p>Stream factories can be created from the {@link CheckpointStorageAccess} through {@link
+ * CheckpointStorageAccess#resolveCheckpointStorageLocation(long,
+ * CheckpointStorageLocationReference)}.
+ */
 public interface CheckpointStreamFactory {
 
-	/**
-	 * Creates an new {@link CheckpointStateOutputStream}. When the stream
-	 * is closed, it returns a state handle that can retrieve the state back.
-	 *
-	 * @param checkpointID The ID of the checkpoint.
-	 * @param timestamp The timestamp of the checkpoint.
-	 *
-	 * @return An output stream that writes state for the given checkpoint.
-	 *
-	 * @throws Exception Exceptions may occur while creating the stream and should be forwarded.
-	 */
-	CheckpointStateOutputStream createCheckpointStateOutputStream(
-			long checkpointID,
-			long timestamp) throws Exception;
+    /**
+     * Creates an new {@link CheckpointStateOutputStream}. When the stream is closed, it returns a
+     * state handle that can retrieve the state back.
+     *
+     * @param scope The state's scope, whether it is exclusive or shared.
+     * @return An output stream that writes state for the given checkpoint.
+     * @throws IOException Exceptions may occur while creating the stream and should be forwarded.
+     */
+    CheckpointStateOutputStream createCheckpointStateOutputStream(CheckpointedStateScope scope)
+            throws IOException;
 
-	/**
-	 * Closes the stream factory, releasing all internal resources, but does not delete any
-	 * persistent checkpoint data.
-	 *
-	 * @throws Exception Exceptions can be forwarded and will be logged by the system
-	 */
-	void close() throws Exception;
+    /**
+     * Tells if we can duplicate the given {@link StreamStateHandle} into the path corresponding to
+     * the given {@link CheckpointedStateScope}.
+     *
+     * <p>This should be a rather cheap operation, preferably not involving any remote accesses.
+     *
+     * @param stateHandle The handle to duplicate
+     * @param scope Scope determining the location to duplicate into
+     * @return true, if we can perform the duplication
+     */
+    boolean canFastDuplicate(StreamStateHandle stateHandle, CheckpointedStateScope scope)
+            throws IOException;
 
-	/**
-	 * A dedicated output stream that produces a {@link StreamStateHandle} when closed.
-	 *
-	 * <p>Note: This is an abstract class and not an interface because {@link OutputStream}
-	 * is an abstract class.
-	 */
-	abstract class CheckpointStateOutputStream extends FSDataOutputStream {
+    /**
+     * Duplicates {@link StreamStateHandle} into the path corresponding to * the given {@link
+     * CheckpointedStateScope}.
+     *
+     * <p>You should first check if you can duplicate with {@link
+     * #canFastDuplicate(StreamStateHandle, CheckpointedStateScope)}.
+     *
+     * @param stateHandles The handles to duplicate
+     * @param scope Scope determining the location to duplicate into
+     * @return The duplicated handle
+     */
+    List<StreamStateHandle> duplicate(
+            List<StreamStateHandle> stateHandles, CheckpointedStateScope scope) throws IOException;
 
-		/**
-		 * Closes the stream and gets a state handle that can create an input stream
-		 * producing the data written to this stream.
-		 *
-		 * @return A state handle that can create an input stream producing the data written to this stream.
-		 * @throws IOException Thrown, if the stream cannot be closed.
-		 */
-		public abstract StreamStateHandle closeAndGetHandle() throws IOException;
-	}
+    /**
+     * A callback method when some previous handle is reused. It is needed by the file merging
+     * mechanism (FLIP-306) which will manage the life cycle of underlying files by file-reusing
+     * information.
+     *
+     * @param previousHandle the previous handles that will be reused.
+     */
+    default void reusePreviousStateHandle(Collection<? extends StreamStateHandle> previousHandle) {
+        // Does nothing for normal stream factory
+    }
+
+    /**
+     * A pre-check hook before the checkpoint writer want to reuse a state handle, if this returns
+     * false, it is not recommended for the writer to rewrite the state file considering the space
+     * amplification.
+     *
+     * @param stateHandle the handle to be reused.
+     * @return true if it can be reused.
+     */
+    default boolean couldReuseStateHandle(StreamStateHandle stateHandle) {
+        // By default, the CheckpointStreamFactory doesn't support snapshot-file-merging, so the
+        // SegmentFileStateHandle type of stateHandle can not be reused.
+        return !FileMergingSnapshotManager.isFileMergingHandle(stateHandle);
+    }
 }

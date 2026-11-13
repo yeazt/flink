@@ -21,127 +21,98 @@ package org.apache.flink.runtime.metrics.scope;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.MetricOptions;
 
-import static org.apache.flink.util.Preconditions.checkNotNull;
+/** A container for component scope formats. */
+public final class ScopeFormats {
 
-/**
- * A container for component scope formats.
- */
-public class ScopeFormats {
+    private final JobManagerScopeFormat jobManagerFormat;
+    private final JobManagerJobScopeFormat jobManagerJobFormat;
+    private final TaskManagerScopeFormat taskManagerFormat;
+    private final TaskManagerJobScopeFormat taskManagerJobFormat;
+    private final TaskScopeFormat taskFormat;
+    private final OperatorScopeFormat operatorFormat;
+    private final JobManagerOperatorScopeFormat jmOperatorFormat;
 
-	private final JobManagerScopeFormat jobManagerFormat;
-	private final JobManagerJobScopeFormat jobManagerJobFormat;
-	private final TaskManagerScopeFormat taskManagerFormat;
-	private final TaskManagerJobScopeFormat taskManagerJobFormat;
-	private final TaskScopeFormat taskFormat;
-	private final OperatorScopeFormat operatorFormat;
+    // ------------------------------------------------------------------------
 
-	// ------------------------------------------------------------------------
+    /** Creates all scope formats, based on the given scope format strings. */
+    private ScopeFormats(
+            String jobManagerFormat,
+            String jobManagerJobFormat,
+            String taskManagerFormat,
+            String taskManagerJobFormat,
+            String taskFormat,
+            String operatorFormat,
+            String jmOperatorFormat) {
+        this.jobManagerFormat = new JobManagerScopeFormat(jobManagerFormat);
+        this.jobManagerJobFormat =
+                new JobManagerJobScopeFormat(jobManagerJobFormat, this.jobManagerFormat);
+        this.taskManagerFormat = new TaskManagerScopeFormat(taskManagerFormat);
+        this.taskManagerJobFormat =
+                new TaskManagerJobScopeFormat(taskManagerJobFormat, this.taskManagerFormat);
+        this.taskFormat = new TaskScopeFormat(taskFormat, this.taskManagerJobFormat);
+        this.operatorFormat = new OperatorScopeFormat(operatorFormat, this.taskFormat);
+        this.jmOperatorFormat =
+                new JobManagerOperatorScopeFormat(jmOperatorFormat, this.jobManagerJobFormat);
+    }
 
-	/**
-	 * Creates all default scope formats.
-	 */
-	public ScopeFormats() {
-		this.jobManagerFormat = new JobManagerScopeFormat(MetricOptions.SCOPE_NAMING_JM.defaultValue());
+    // ------------------------------------------------------------------------
+    //  Accessors
+    // ------------------------------------------------------------------------
 
-		this.jobManagerJobFormat = new JobManagerJobScopeFormat(
-			MetricOptions.SCOPE_NAMING_JM_JOB.defaultValue(), this.jobManagerFormat);
+    public JobManagerScopeFormat getJobManagerFormat() {
+        return this.jobManagerFormat;
+    }
 
-		this.taskManagerFormat = new TaskManagerScopeFormat(MetricOptions.SCOPE_NAMING_TM.defaultValue());
+    public TaskManagerScopeFormat getTaskManagerFormat() {
+        return this.taskManagerFormat;
+    }
 
-		this.taskManagerJobFormat = new TaskManagerJobScopeFormat(
-			MetricOptions.SCOPE_NAMING_TM_JOB.defaultValue(), this.taskManagerFormat);
+    public TaskManagerJobScopeFormat getTaskManagerJobFormat() {
+        return this.taskManagerJobFormat;
+    }
 
-		this.taskFormat = new TaskScopeFormat(
-				MetricOptions.SCOPE_NAMING_TASK.defaultValue(), this.taskManagerJobFormat);
+    public JobManagerJobScopeFormat getJobManagerJobFormat() {
+        return this.jobManagerJobFormat;
+    }
 
-		this.operatorFormat = new OperatorScopeFormat(
-			MetricOptions.SCOPE_NAMING_OPERATOR.defaultValue(), this.taskFormat);
-	}
+    public TaskScopeFormat getTaskFormat() {
+        return this.taskFormat;
+    }
 
-	/**
-	 * Creates all scope formats, based on the given scope format strings.
-	 */
-	public ScopeFormats(
-			String jobManagerFormat,
-			String jobManagerJobFormat,
-			String taskManagerFormat,
-			String taskManagerJobFormat,
-			String taskFormat,
-			String operatorFormat)
-	{
-		this.jobManagerFormat = new JobManagerScopeFormat(jobManagerFormat);
-		this.jobManagerJobFormat = new JobManagerJobScopeFormat(jobManagerJobFormat, this.jobManagerFormat);
-		this.taskManagerFormat = new TaskManagerScopeFormat(taskManagerFormat);
-		this.taskManagerJobFormat = new TaskManagerJobScopeFormat(taskManagerJobFormat, this.taskManagerFormat);
-		this.taskFormat = new TaskScopeFormat(taskFormat, this.taskManagerJobFormat);
-		this.operatorFormat = new OperatorScopeFormat(operatorFormat, this.taskFormat);
-	}
+    public OperatorScopeFormat getOperatorFormat() {
+        return this.operatorFormat;
+    }
 
-	/**
-	 * Creates a {@code ScopeFormats} with the given scope formats.
-	 */
-	public ScopeFormats(
-			JobManagerScopeFormat jobManagerFormat,
-			JobManagerJobScopeFormat jobManagerJobFormat,
-			TaskManagerScopeFormat taskManagerFormat,
-			TaskManagerJobScopeFormat taskManagerJobFormat,
-			TaskScopeFormat taskFormat,
-			OperatorScopeFormat operatorFormat)
-	{
-		this.jobManagerFormat = checkNotNull(jobManagerFormat);
-		this.jobManagerJobFormat = checkNotNull(jobManagerJobFormat);
-		this.taskManagerFormat = checkNotNull(taskManagerFormat);
-		this.taskManagerJobFormat = checkNotNull(taskManagerJobFormat);
-		this.taskFormat = checkNotNull(taskFormat);
-		this.operatorFormat = checkNotNull(operatorFormat);
-	}
+    public JobManagerOperatorScopeFormat getJmOperatorFormat() {
+        return jmOperatorFormat;
+    }
 
-	// ------------------------------------------------------------------------
-	//  Accessors
-	// ------------------------------------------------------------------------
+    // ------------------------------------------------------------------------
+    //  Parsing from Config
+    // ------------------------------------------------------------------------
 
-	public JobManagerScopeFormat getJobManagerFormat() {
-		return this.jobManagerFormat;
-	}
+    /**
+     * Creates the scope formats as defined in the given configuration.
+     *
+     * @param config The configuration that defines the formats
+     * @return The ScopeFormats parsed from the configuration
+     */
+    public static ScopeFormats fromConfig(Configuration config) {
+        String jmFormat = config.get(MetricOptions.SCOPE_NAMING_JM);
+        String jmJobFormat = config.get(MetricOptions.SCOPE_NAMING_JM_JOB);
+        String tmFormat = config.get(MetricOptions.SCOPE_NAMING_TM);
+        String tmJobFormat = config.get(MetricOptions.SCOPE_NAMING_TM_JOB);
+        String taskFormat = config.get(MetricOptions.SCOPE_NAMING_TASK);
+        String operatorFormat = config.get(MetricOptions.SCOPE_NAMING_OPERATOR);
+        String jmOperatorFormat = config.get(MetricOptions.SCOPE_NAMING_JM_OPERATOR);
 
-	public TaskManagerScopeFormat getTaskManagerFormat() {
-		return this.taskManagerFormat;
-	}
-
-	public TaskManagerJobScopeFormat getTaskManagerJobFormat() {
-		return this.taskManagerJobFormat;
-	}
-
-	public JobManagerJobScopeFormat getJobManagerJobFormat() {
-		return this.jobManagerJobFormat;
-	}
-
-	public TaskScopeFormat getTaskFormat() {
-		return this.taskFormat;
-	}
-
-	public OperatorScopeFormat getOperatorFormat() {
-		return this.operatorFormat;
-	}
-
-	// ------------------------------------------------------------------------
-	//  Parsing from Config
-	// ------------------------------------------------------------------------
-
-	/**
-	 * Creates the scope formats as defined in the given configuration
-	 * 
-	 * @param config The configuration that defines the formats
-	 * @return The ScopeFormats parsed from the configuration
-	 */
-	public static ScopeFormats fromConfig(Configuration config) {
-		String jmFormat = config.getString(MetricOptions.SCOPE_NAMING_JM);
-		String jmJobFormat = config.getString(MetricOptions.SCOPE_NAMING_JM_JOB);
-		String tmFormat = config.getString(MetricOptions.SCOPE_NAMING_TM);
-		String tmJobFormat = config.getString(MetricOptions.SCOPE_NAMING_TM_JOB);
-		String taskFormat = config.getString(MetricOptions.SCOPE_NAMING_TASK);
-		String operatorFormat = config.getString(MetricOptions.SCOPE_NAMING_OPERATOR);
-
-		return new ScopeFormats(jmFormat, jmJobFormat, tmFormat, tmJobFormat, taskFormat, operatorFormat);
-	}
+        return new ScopeFormats(
+                jmFormat,
+                jmJobFormat,
+                tmFormat,
+                tmJobFormat,
+                taskFormat,
+                operatorFormat,
+                jmOperatorFormat);
+    }
 }

@@ -18,145 +18,192 @@
 
 package org.apache.flink.runtime.io.network.api.serialization;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertTrue;
+import org.apache.flink.api.common.watermark.BoolWatermark;
+import org.apache.flink.api.common.watermark.LongWatermark;
+import org.apache.flink.core.execution.SavepointFormatType;
+import org.apache.flink.runtime.checkpoint.CheckpointOptions;
+import org.apache.flink.runtime.checkpoint.CheckpointType;
+import org.apache.flink.runtime.checkpoint.SavepointType;
+import org.apache.flink.runtime.event.AbstractEvent;
+import org.apache.flink.runtime.event.WatermarkEvent;
+import org.apache.flink.runtime.io.network.api.CancelCheckpointMarker;
+import org.apache.flink.runtime.io.network.api.CheckpointBarrier;
+import org.apache.flink.runtime.io.network.api.EndOfData;
+import org.apache.flink.runtime.io.network.api.EndOfPartitionEvent;
+import org.apache.flink.runtime.io.network.api.EndOfSegmentEvent;
+import org.apache.flink.runtime.io.network.api.EndOfSuperstepEvent;
+import org.apache.flink.runtime.io.network.api.EventAnnouncement;
+import org.apache.flink.runtime.io.network.api.RecoveryMetadata;
+import org.apache.flink.runtime.io.network.api.StopMode;
+import org.apache.flink.runtime.io.network.api.SubtaskConnectionDescriptor;
+import org.apache.flink.runtime.io.network.buffer.Buffer;
+import org.apache.flink.runtime.io.network.buffer.BufferConsumer;
+import org.apache.flink.runtime.io.network.partition.consumer.EndOfInputChannelStateEvent;
+import org.apache.flink.runtime.io.network.partition.consumer.EndOfOutputChannelStateEvent;
+import org.apache.flink.runtime.io.network.util.TestTaskEvent;
+import org.apache.flink.runtime.state.CheckpointStorageLocationReference;
+
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import org.apache.flink.runtime.checkpoint.CheckpointOptions;
-import org.apache.flink.runtime.event.AbstractEvent;
-import org.apache.flink.runtime.io.network.api.CancelCheckpointMarker;
-import org.apache.flink.runtime.io.network.api.CheckpointBarrier;
-import org.apache.flink.runtime.io.network.api.EndOfPartitionEvent;
-import org.apache.flink.runtime.io.network.api.EndOfSuperstepEvent;
-import org.apache.flink.runtime.io.network.buffer.Buffer;
-import org.apache.flink.runtime.io.network.util.TestTaskEvent;
-import org.junit.Test;
 
-public class EventSerializerTest {
+import static org.assertj.core.api.Assertions.assertThat;
 
-	@Test
-	public void testCheckpointBarrierSerialization() throws Exception {
-		long id = Integer.MAX_VALUE + 123123L;
-		long timestamp = Integer.MAX_VALUE + 1228L;
+/** Tests for the {@link EventSerializer}. */
+class EventSerializerTest {
 
-		CheckpointOptions checkpoint = CheckpointOptions.forFullCheckpoint();
-		testCheckpointBarrierSerialization(id, timestamp, checkpoint);
+    private final AbstractEvent[] events = {
+        EndOfPartitionEvent.INSTANCE,
+        EndOfSuperstepEvent.INSTANCE,
+        new EndOfData(StopMode.DRAIN),
+        new EndOfData(StopMode.NO_DRAIN),
+        new CheckpointBarrier(
+                1678L,
+                4623784L,
+                new CheckpointOptions(
+                        CheckpointType.CHECKPOINT,
+                        CheckpointStorageLocationReference.getDefault())),
+        new CheckpointBarrier(
+                1678L,
+                4623784L,
+                new CheckpointOptions(
+                        CheckpointType.FULL_CHECKPOINT,
+                        CheckpointStorageLocationReference.getDefault())),
+        new CheckpointBarrier(
+                1678L,
+                4623784L,
+                new CheckpointOptions(
+                        SavepointType.savepoint(SavepointFormatType.CANONICAL),
+                        CheckpointStorageLocationReference.getDefault())),
+        new CheckpointBarrier(
+                1678L,
+                4623784L,
+                new CheckpointOptions(
+                        SavepointType.suspend(SavepointFormatType.CANONICAL),
+                        CheckpointStorageLocationReference.getDefault())),
+        new CheckpointBarrier(
+                1678L,
+                4623784L,
+                new CheckpointOptions(
+                        SavepointType.terminate(SavepointFormatType.CANONICAL),
+                        CheckpointStorageLocationReference.getDefault())),
+        new CheckpointBarrier(
+                1678L,
+                4623784L,
+                new CheckpointOptions(
+                        SavepointType.savepoint(SavepointFormatType.NATIVE),
+                        CheckpointStorageLocationReference.getDefault())),
+        new CheckpointBarrier(
+                1678L,
+                4623784L,
+                new CheckpointOptions(
+                        SavepointType.suspend(SavepointFormatType.NATIVE),
+                        CheckpointStorageLocationReference.getDefault())),
+        new CheckpointBarrier(
+                1678L,
+                4623784L,
+                new CheckpointOptions(
+                        SavepointType.terminate(SavepointFormatType.NATIVE),
+                        CheckpointStorageLocationReference.getDefault())),
+        new TestTaskEvent(Math.random(), 12361231273L),
+        new CancelCheckpointMarker(287087987329842L),
+        new EventAnnouncement(
+                new CheckpointBarrier(
+                        42L,
+                        1337L,
+                        CheckpointOptions.alignedWithTimeout(
+                                CheckpointType.CHECKPOINT,
+                                CheckpointStorageLocationReference.getDefault(),
+                                10)),
+                44),
+        new SubtaskConnectionDescriptor(23, 42),
+        EndOfSegmentEvent.INSTANCE,
+        new RecoveryMetadata(3),
+        new WatermarkEvent(new LongWatermark(42L, "test"), false),
+        new WatermarkEvent(new BoolWatermark(true, "test"), true),
+        new WatermarkEvent(new BoolWatermark(true, "test"), true),
+        EndOfInputChannelStateEvent.INSTANCE,
+        EndOfOutputChannelStateEvent.INSTANCE,
+    };
 
-		CheckpointOptions savepoint = CheckpointOptions.forSavepoint("1289031838919123");
-		testCheckpointBarrierSerialization(id, timestamp, savepoint);
-	}
+    @Test
+    void testSerializeDeserializeEvent() throws Exception {
+        for (AbstractEvent evt : events) {
+            ByteBuffer serializedEvent = EventSerializer.toSerializedEvent(evt);
+            assertThat(serializedEvent.hasRemaining()).isTrue();
 
-	private void testCheckpointBarrierSerialization(long id, long timestamp, CheckpointOptions options) throws IOException {
-		ClassLoader cl = Thread.currentThread().getContextClassLoader();
+            AbstractEvent deserialized =
+                    EventSerializer.fromSerializedEvent(
+                            serializedEvent, getClass().getClassLoader());
+            assertThat(deserialized).isNotNull().isEqualTo(evt);
+        }
+    }
 
-		CheckpointBarrier barrier = new CheckpointBarrier(id, timestamp, options);
-		ByteBuffer serialized = EventSerializer.toSerializedEvent(barrier);
-		CheckpointBarrier deserialized = (CheckpointBarrier) EventSerializer.fromSerializedEvent(serialized, cl);
-		assertFalse(serialized.hasRemaining());
+    @Test
+    void testToBufferConsumer() throws IOException {
+        for (AbstractEvent evt : events) {
+            BufferConsumer bufferConsumer = EventSerializer.toBufferConsumer(evt, false);
 
-		assertEquals(id, deserialized.getId());
-		assertEquals(timestamp, deserialized.getTimestamp());
-		assertEquals(options.getCheckpointType(), deserialized.getCheckpointOptions().getCheckpointType());
-		assertEquals(options.getTargetLocation(), deserialized.getCheckpointOptions().getTargetLocation());
-	}
+            assertThat(bufferConsumer.isBuffer()).isFalse();
+            assertThat(bufferConsumer.isFinished()).isTrue();
+            assertThat(bufferConsumer.isDataAvailable()).isTrue();
+            assertThat(bufferConsumer.isRecycled()).isFalse();
 
-	@Test
-	public void testSerializeDeserializeEvent() throws Exception {
-		AbstractEvent[] events = {
-				EndOfPartitionEvent.INSTANCE,
-				EndOfSuperstepEvent.INSTANCE,
-				new CheckpointBarrier(1678L, 4623784L, CheckpointOptions.forFullCheckpoint()),
-				new TestTaskEvent(Math.random(), 12361231273L),
-				new CancelCheckpointMarker(287087987329842L)
-		};
-		
-		for (AbstractEvent evt : events) {
-			ByteBuffer serializedEvent = EventSerializer.toSerializedEvent(evt);
-			assertTrue(serializedEvent.hasRemaining());
+            if (evt instanceof CheckpointBarrier) {
+                assertThat(bufferConsumer.build().getDataType().isBlockingUpstream()).isTrue();
+            } else if (evt instanceof EndOfData) {
+                assertThat(bufferConsumer.build().getDataType())
+                        .isEqualTo(Buffer.DataType.END_OF_DATA);
+            } else if (evt instanceof EndOfPartitionEvent) {
+                assertThat(bufferConsumer.build().getDataType())
+                        .isEqualTo(Buffer.DataType.END_OF_PARTITION);
+            } else if (evt instanceof WatermarkEvent) {
+                if (((WatermarkEvent) evt).isAligned()) {
+                    assertThat(bufferConsumer.build().getDataType())
+                            .isEqualTo(Buffer.DataType.ALIGNED_WATERMARK_EVENT);
+                } else {
+                    assertThat(bufferConsumer.build().getDataType())
+                            .isEqualTo(Buffer.DataType.UNALIGNED_WATERMARK_EVENT);
+                }
+            } else if (evt instanceof EndOfOutputChannelStateEvent) {
+                assertThat(bufferConsumer.build().getDataType())
+                        .isEqualTo(Buffer.DataType.RECOVERY_COMPLETION);
+            } else {
+                assertThat(bufferConsumer.build().getDataType())
+                        .isEqualTo(Buffer.DataType.EVENT_BUFFER);
+            }
+        }
+    }
 
-			AbstractEvent deserialized = 
-					EventSerializer.fromSerializedEvent(serializedEvent, getClass().getClassLoader());
-			assertNotNull(deserialized);
-			assertEquals(evt, deserialized);
-		}
-	}
+    @Test
+    void testToBuffer() throws IOException {
+        for (AbstractEvent evt : events) {
+            Buffer buffer = EventSerializer.toBuffer(evt, false);
 
-	/**
-	 * Tests {@link EventSerializer#isEvent(Buffer, Class, ClassLoader)}
-	 * whether it peaks into the buffer only, i.e. after the call, the buffer
-	 * is still de-serializable.
-	 *
-	 * @throws Exception
-	 */
-	@Test
-	public void testIsEventPeakOnly() throws Exception {
-		final Buffer serializedEvent =
-			EventSerializer.toBuffer(EndOfPartitionEvent.INSTANCE);
-		try {
-			final ClassLoader cl = getClass().getClassLoader();
-			assertTrue(
-				EventSerializer
-					.isEvent(serializedEvent, EndOfPartitionEvent.class, cl));
-			EndOfPartitionEvent event = (EndOfPartitionEvent) EventSerializer
-				.fromBuffer(serializedEvent, cl);
-			assertEquals(EndOfPartitionEvent.INSTANCE, event);
-		} finally {
-			serializedEvent.recycle();
-		}
-	}
+            assertThat(buffer.isBuffer()).isFalse();
+            assertThat(buffer.readableBytes()).isGreaterThan(0);
+            assertThat(buffer.isRecycled()).isFalse();
 
-	/**
-	 * Tests {@link EventSerializer#isEvent(Buffer, Class, ClassLoader)} returns
-	 * the correct answer for various encoded event buffers.
-	 *
-	 * @throws Exception
-	 */
-	@Test
-	public void testIsEvent() throws Exception {
-		AbstractEvent[] events = {
-			EndOfPartitionEvent.INSTANCE,
-			EndOfSuperstepEvent.INSTANCE,
-			new CheckpointBarrier(1678L, 4623784L, CheckpointOptions.forFullCheckpoint()),
-			new TestTaskEvent(Math.random(), 12361231273L),
-			new CancelCheckpointMarker(287087987329842L)
-		};
-
-		for (AbstractEvent evt : events) {
-			for (AbstractEvent evt2 : events) {
-				if (evt == evt2) {
-					assertTrue(checkIsEvent(evt, evt2.getClass()));
-				} else {
-					assertFalse(checkIsEvent(evt, evt2.getClass()));
-				}
-			}
-		}
-	}
-
-	/**
-	 * Returns the result of
-	 * {@link EventSerializer#isEvent(Buffer, Class, ClassLoader)} on a buffer
-	 * that encodes the given <tt>event</tt>.
-	 *
-	 * @param event the event to encode
-	 * @param eventClass the event class to check against
-	 *
-	 * @return whether {@link EventSerializer#isEvent(ByteBuffer, Class, ClassLoader)}
-	 * 		thinks the encoded buffer matches the class
-	 * @throws IOException
-	 */
-	private boolean checkIsEvent(
-			AbstractEvent event, 
-			Class<? extends AbstractEvent> eventClass) throws IOException {
-
-		final Buffer serializedEvent = EventSerializer.toBuffer(event);
-		try {
-			final ClassLoader cl = getClass().getClassLoader();
-			return EventSerializer.isEvent(serializedEvent, eventClass, cl);
-		} finally {
-			serializedEvent.recycle();
-		}
-	}
+            if (evt instanceof CheckpointBarrier) {
+                assertThat(buffer.getDataType().isBlockingUpstream()).isTrue();
+            } else if (evt instanceof EndOfData) {
+                assertThat(buffer.getDataType()).isEqualTo(Buffer.DataType.END_OF_DATA);
+            } else if (evt instanceof EndOfPartitionEvent) {
+                assertThat(buffer.getDataType()).isEqualTo(Buffer.DataType.END_OF_PARTITION);
+            } else if (evt instanceof WatermarkEvent) {
+                if (((WatermarkEvent) evt).isAligned()) {
+                    assertThat(buffer.getDataType())
+                            .isEqualTo(Buffer.DataType.ALIGNED_WATERMARK_EVENT);
+                } else {
+                    assertThat(buffer.getDataType())
+                            .isEqualTo(Buffer.DataType.UNALIGNED_WATERMARK_EVENT);
+                }
+            } else if (evt instanceof EndOfOutputChannelStateEvent) {
+                assertThat(buffer.getDataType()).isEqualTo(Buffer.DataType.RECOVERY_COMPLETION);
+            } else {
+                assertThat(buffer.getDataType()).isEqualTo(Buffer.DataType.EVENT_BUFFER);
+            }
+        }
+    }
 }

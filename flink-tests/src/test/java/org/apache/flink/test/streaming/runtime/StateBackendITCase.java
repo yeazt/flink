@@ -19,112 +19,117 @@
 package org.apache.flink.test.streaming.runtime;
 
 import org.apache.flink.api.common.JobID;
+import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.common.functions.RichMapFunction;
-import org.apache.flink.api.common.restartstrategy.RestartStrategies;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
-import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.java.tuple.Tuple2;
-import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.IllegalConfigurationException;
+import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.runtime.client.JobExecutionException;
-import org.apache.flink.runtime.execution.Environment;
-import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
-import org.apache.flink.runtime.state.AbstractStateBackend;
-import org.apache.flink.runtime.state.CheckpointStreamFactory;
-import org.apache.flink.runtime.state.KeyGroupRange;
+import org.apache.flink.runtime.state.CheckpointStorage;
+import org.apache.flink.runtime.state.CheckpointStorageAccess;
+import org.apache.flink.runtime.state.CompletedCheckpointStorageLocation;
 import org.apache.flink.runtime.state.OperatorStateBackend;
+import org.apache.flink.runtime.state.StateBackend;
+import org.apache.flink.runtime.state.StateBackendFactory;
+import org.apache.flink.runtime.state.memory.MemoryBackendCheckpointStorageAccess;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.util.StreamingMultipleProgramsTestBase;
-import org.junit.Test;
+import org.apache.flink.streaming.util.RestartStrategyUtils;
+import org.apache.flink.streaming.util.StateBackendUtils;
+import org.apache.flink.test.util.AbstractTestBase;
+import org.apache.flink.util.ExceptionUtils;
+
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-public class StateBackendITCase extends StreamingMultipleProgramsTestBase {
+/** Integration tests for {@link OperatorStateBackend}. */
+class StateBackendITCase extends AbstractTestBase {
 
-	/**
-	 * Verify that the user-specified state backend is used even if checkpointing is disabled.
-	 *
-	 * @throws Exception
-	 */
-	@Test
-	public void testStateBackendWithoutCheckpointing() throws Exception {
+    /** Verify that the user-specified state backend is used even if checkpointing is disabled. */
+    @Test
+    void testStateBackendWithoutCheckpointing() throws Exception {
+        StreamExecutionEnvironment see = StreamExecutionEnvironment.getExecutionEnvironment();
+        see.setParallelism(1);
 
-		StreamExecutionEnvironment see = StreamExecutionEnvironment.getExecutionEnvironment();
-		see.setParallelism(1);
+        StateBackendUtils.configureStateBackendWithFactory(
+                see,
+                "org.apache.flink.test.streaming.runtime.StateBackendITCase$FailingStateBackendFactory");
+        RestartStrategyUtils.configureNoRestartStrategy(see);
 
-		see.getConfig().setRestartStrategy(RestartStrategies.noRestart());
-		see.setStateBackend(new FailingStateBackend());
+        see.fromData(new Tuple2<>("Hello", 1))
+                .keyBy(x -> x.f0)
+                .map(
+                        new RichMapFunction<Tuple2<String, Integer>, String>() {
+                            private static final long serialVersionUID = 1L;
 
+                            @Override
+                            public void open(OpenContext openContext) throws Exception {
+                                super.open(openContext);
+                                getRuntimeContext()
+                                        .getState(
+                                                new ValueStateDescriptor<>("Test", Integer.class));
+                            }
 
-		see.fromElements(new Tuple2<>("Hello", 1))
-			.keyBy(0)
-			.map(new RichMapFunction<Tuple2<String,Integer>, String>() {
-				private static final long serialVersionUID = 1L;
+                            @Override
+                            public String map(Tuple2<String, Integer> value) throws Exception {
+                                return value.f0;
+                            }
+                        })
+                .print();
 
-				@Override
-				public void open(Configuration parameters) throws Exception {
-					super.open(parameters);
-					getRuntimeContext().getState(new ValueStateDescriptor<Integer>("Test", Integer.class, 0));
-				}
+        assertThatThrownBy(see::execute)
+                .isInstanceOf(JobExecutionException.class)
+                .satisfies(
+                        throwable -> {
+                            assertThat(
+                                            ExceptionUtils.findThrowable(
+                                                    throwable, SuccessException.class))
+                                    .isPresent();
+                        });
+    }
 
-				@Override
-				public String map(Tuple2<String, Integer> value) throws Exception {
-					return value.f0;
-				}
-			})
-			.print();
+    public static class FailingStateBackendFactory
+            implements StateBackendFactory<FailingStateBackend> {
+        @Override
+        public FailingStateBackend createFromConfig(ReadableConfig config, ClassLoader classLoader)
+                throws IllegalConfigurationException, IOException {
+            return new FailingStateBackend();
+        }
+    }
 
-		try {
-			see.execute();
-			fail();
-		}
-		catch (JobExecutionException e) {
-			Throwable t = e.getCause();
-			assertTrue("wrong exception", t instanceof SuccessException);
-		}
-	}
+    private static class FailingStateBackend implements StateBackend, CheckpointStorage {
+        private static final long serialVersionUID = 1L;
 
-	public static class FailingStateBackend extends AbstractStateBackend {
-		private static final long serialVersionUID = 1L;
+        @Override
+        public CompletedCheckpointStorageLocation resolveCheckpoint(String pointer)
+                throws IOException {
+            throw new UnsupportedOperationException();
+        }
 
-		@Override
-		public CheckpointStreamFactory createStreamFactory(JobID jobId,
-				String operatorIdentifier) throws IOException {
-			throw new SuccessException();
-		}
+        @Override
+        public CheckpointStorageAccess createCheckpointStorage(JobID jobId) throws IOException {
+            return new MemoryBackendCheckpointStorageAccess(jobId, null, null, true, 1_000_000);
+        }
 
-		@Override
-		public CheckpointStreamFactory createSavepointStreamFactory(JobID jobId,
-			String operatorIdentifier, String targetLocation) throws IOException {
-			throw new UnsupportedOperationException();
-		}
+        @Override
+        public <K> AbstractKeyedStateBackend<K> createKeyedStateBackend(
+                KeyedStateBackendParameters<K> parameters) throws IOException {
+            throw new SuccessException();
+        }
 
-		@Override
-		public <K> AbstractKeyedStateBackend<K> createKeyedStateBackend(
-				Environment env,
-				JobID jobID,
-				String operatorIdentifier,
-				TypeSerializer<K> keySerializer,
-				int numberOfKeyGroups,
-				KeyGroupRange keyGroupRange,
-				TaskKvStateRegistry kvStateRegistry) throws IOException {
-			throw new SuccessException();
-		}
+        @Override
+        public OperatorStateBackend createOperatorStateBackend(
+                OperatorStateBackendParameters parameters) throws Exception {
+            throw new SuccessException();
+        }
+    }
 
-		@Override
-		public OperatorStateBackend createOperatorStateBackend(
-			Environment env,
-			String operatorIdentifier) throws Exception {
-
-			throw new UnsupportedOperationException();
-		}
-	}
-
-	static final class SuccessException extends IOException {
-		private static final long serialVersionUID = -9218191172606739598L;
-	}
-
+    static final class SuccessException extends IOException {
+        private static final long serialVersionUID = -9218191172606739598L;
+    }
 }

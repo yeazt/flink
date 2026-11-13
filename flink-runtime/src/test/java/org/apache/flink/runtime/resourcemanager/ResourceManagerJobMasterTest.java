@@ -19,259 +19,280 @@
 package org.apache.flink.runtime.resourcemanager;
 
 import org.apache.flink.api.common.JobID;
-import org.apache.flink.api.common.time.Time;
-import org.apache.flink.runtime.clusterframework.FlinkResourceManager;
 import org.apache.flink.runtime.clusterframework.types.ResourceID;
-import org.apache.flink.runtime.concurrent.Future;
-import org.apache.flink.runtime.heartbeat.HeartbeatServices;
 import org.apache.flink.runtime.highavailability.HighAvailabilityServices;
-import org.apache.flink.runtime.highavailability.TestingHighAvailabilityServices;
-import org.apache.flink.runtime.jobmaster.JobMasterGateway;
+import org.apache.flink.runtime.jobmaster.JobMaster;
+import org.apache.flink.runtime.jobmaster.JobMasterId;
 import org.apache.flink.runtime.jobmaster.JobMasterRegistrationSuccess;
-import org.apache.flink.runtime.leaderelection.TestingLeaderElectionService;
-import org.apache.flink.runtime.leaderelection.TestingLeaderRetrievalService;
-import org.apache.flink.runtime.metrics.MetricRegistry;
-import org.apache.flink.runtime.resourcemanager.slotmanager.SlotManager;
-import org.apache.flink.runtime.rpc.FatalErrorHandler;
-import org.apache.flink.runtime.rpc.TestingSerialRpcService;
+import org.apache.flink.runtime.jobmaster.utils.TestingJobMasterGateway;
+import org.apache.flink.runtime.jobmaster.utils.TestingJobMasterGatewayBuilder;
+import org.apache.flink.runtime.leaderelection.TestingLeaderElection;
+import org.apache.flink.runtime.leaderretrieval.SettableLeaderRetrievalService;
+import org.apache.flink.runtime.messages.Acknowledge;
 import org.apache.flink.runtime.registration.RegistrationResponse;
-import org.apache.flink.runtime.testingUtils.TestingUtils;
-import org.apache.flink.runtime.util.TestingFatalErrorHandler;
-import org.apache.flink.util.TestLogger;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Test;
+import org.apache.flink.runtime.resourcemanager.exceptions.ResourceManagerException;
+import org.apache.flink.runtime.rpc.RpcUtils;
+import org.apache.flink.runtime.rpc.TestingRpcService;
+import org.apache.flink.runtime.rpc.exceptions.FencingTokenException;
+import org.apache.flink.runtime.taskexecutor.TaskExecutorGateway;
+import org.apache.flink.runtime.taskexecutor.TestingTaskExecutorGatewayBuilder;
+import org.apache.flink.util.FlinkRuntimeException;
 
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.time.Duration;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
-import static org.junit.Assert.assertTrue;
-import static org.mockito.Mockito.*;
+import static org.apache.flink.core.testutils.FlinkAssertions.assertThatFuture;
+import static org.apache.flink.runtime.resourcemanager.ResourceManagerPartitionLifecycleTest.registerTaskExecutor;
+import static org.assertj.core.api.Assertions.assertThat;
 
-public class ResourceManagerJobMasterTest extends TestLogger {
+/** Tests for the interaction between the {@link ResourceManager} and the {@link JobMaster}. */
+class ResourceManagerJobMasterTest {
 
-	private TestingSerialRpcService rpcService;
+    private static final Duration TIMEOUT = Duration.ofSeconds(10L);
 
-	@Before
-	public void setup() throws Exception {
-		rpcService = new TestingSerialRpcService();
-	}
+    private TestingRpcService rpcService;
 
-	@After
-	public void teardown() throws Exception {
-		rpcService.stopService();
-	}
+    private JobID jobId;
 
-	/**
-	 * Test receive normal registration from job master and receive duplicate registration from job master
-	 */
-	@Test
-	public void testRegisterJobMaster() throws Exception {
-		String jobMasterAddress = "/jobMasterAddress1";
-		JobID jobID = mockJobMaster(jobMasterAddress);
-		TestingLeaderElectionService resourceManagerLeaderElectionService = new TestingLeaderElectionService();
-		UUID jmLeaderID = UUID.randomUUID();
-		final ResourceID jmResourceId = new ResourceID(jobMasterAddress);
-		TestingLeaderRetrievalService jobMasterLeaderRetrievalService = new TestingLeaderRetrievalService(jobMasterAddress, jmLeaderID);
-		TestingFatalErrorHandler testingFatalErrorHandler = new TestingFatalErrorHandler();
-		final ResourceManager resourceManager = createAndStartResourceManager(resourceManagerLeaderElectionService, jobID, jobMasterLeaderRetrievalService, testingFatalErrorHandler);
-		final UUID rmLeaderSessionId = grantResourceManagerLeadership(resourceManagerLeaderElectionService);
+    private ResourceID jobMasterResourceId;
 
-		// test response successful
-		Future<RegistrationResponse> successfulFuture = resourceManager.registerJobManager(
-			rmLeaderSessionId,
-			jmLeaderID,
-			jmResourceId,
-			jobMasterAddress,
-			jobID);
-		RegistrationResponse response = successfulFuture.get(5L, TimeUnit.SECONDS);
-		assertTrue(response instanceof JobMasterRegistrationSuccess);
+    private TestingJobMasterGateway jobMasterGateway;
 
-		if (testingFatalErrorHandler.hasExceptionOccurred()) {
-			testingFatalErrorHandler.rethrowError();
-		}
-	}
+    private SettableLeaderRetrievalService jobMasterLeaderRetrievalService;
 
-	/**
-	 * Test receive registration with unmatched leadershipId from job master
-	 */
-	@Test
-	public void testRegisterJobMasterWithUnmatchedLeaderSessionId1() throws Exception {
-		String jobMasterAddress = "/jobMasterAddress1";
-		JobID jobID = mockJobMaster(jobMasterAddress);
-		TestingLeaderElectionService resourceManagerLeaderElectionService = new TestingLeaderElectionService();
-		UUID jmLeaderID = UUID.randomUUID();
-		final ResourceID jmResourceId = new ResourceID(jobMasterAddress);
-		TestingLeaderRetrievalService jobMasterLeaderRetrievalService = new TestingLeaderRetrievalService(jobMasterAddress, jmLeaderID);
-		TestingFatalErrorHandler testingFatalErrorHandler = new TestingFatalErrorHandler();
-		final ResourceManager resourceManager = createAndStartResourceManager(resourceManagerLeaderElectionService, jobID, jobMasterLeaderRetrievalService, testingFatalErrorHandler);
-		final UUID rmLeaderSessionId = grantResourceManagerLeadership(resourceManagerLeaderElectionService);
+    private TestingResourceManagerService resourceManagerService;
 
-		// test throw exception when receive a registration from job master which takes unmatched leaderSessionId
-		UUID differentLeaderSessionID = UUID.randomUUID();
-		Future<RegistrationResponse> unMatchedLeaderFuture = resourceManager.registerJobManager(
-			differentLeaderSessionID,
-			jmLeaderID,
-			jmResourceId,
-			jobMasterAddress,
-			jobID);
-		assertTrue(unMatchedLeaderFuture.get(5, TimeUnit.SECONDS) instanceof RegistrationResponse.Decline);
+    private ResourceManagerGateway resourceManagerGateway;
 
-		if (testingFatalErrorHandler.hasExceptionOccurred()) {
-			testingFatalErrorHandler.rethrowError();
-		}
-	}
+    @BeforeEach
+    void setup() throws Exception {
+        rpcService = new TestingRpcService();
 
-	/**
-	 * Test receive registration with unmatched leadershipId from job master
-	 */
-	@Test
-	public void testRegisterJobMasterWithUnmatchedLeaderSessionId2() throws Exception {
-		String jobMasterAddress = "/jobMasterAddress1";
-		JobID jobID = mockJobMaster(jobMasterAddress);
-		TestingLeaderElectionService resourceManagerLeaderElectionService = new TestingLeaderElectionService();
-		TestingLeaderRetrievalService jobMasterLeaderRetrievalService = new TestingLeaderRetrievalService(
-			"localhost",
-			HighAvailabilityServices.DEFAULT_LEADER_ID);
-		TestingFatalErrorHandler testingFatalErrorHandler = new TestingFatalErrorHandler();
-		final ResourceManager resourceManager = createAndStartResourceManager(resourceManagerLeaderElectionService, jobID, jobMasterLeaderRetrievalService, testingFatalErrorHandler);
-		final UUID rmLeaderSessionId = grantResourceManagerLeadership(resourceManagerLeaderElectionService);
-		final UUID jmLeaderSessionId = grantResourceManagerLeadership(resourceManagerLeaderElectionService);
-		final ResourceID jmResourceId = new ResourceID(jobMasterAddress);
+        jobId = new JobID();
+        jobMasterResourceId = ResourceID.generate();
 
-		// test throw exception when receive a registration from job master which takes unmatched leaderSessionId
-		UUID differentLeaderSessionID = UUID.randomUUID();
-		Future<RegistrationResponse> unMatchedLeaderFuture = resourceManager.registerJobManager(
-			rmLeaderSessionId,
-			differentLeaderSessionID,
-			jmResourceId,
-			jobMasterAddress,
-			jobID);
-		assertTrue(unMatchedLeaderFuture.get(5, TimeUnit.SECONDS) instanceof RegistrationResponse.Decline);
+        createAndRegisterJobMasterGateway();
 
-		if (testingFatalErrorHandler.hasExceptionOccurred()) {
-			testingFatalErrorHandler.rethrowError();
-		}
-	}
+        createAndStartResourceManagerService();
+    }
 
-	/**
-	 * Test receive registration with invalid address from job master
-	 */
-	@Test
-	public void testRegisterJobMasterFromInvalidAddress() throws Exception {
-		String jobMasterAddress = "/jobMasterAddress1";
-		JobID jobID = mockJobMaster(jobMasterAddress);
-		TestingLeaderElectionService resourceManagerLeaderElectionService = new TestingLeaderElectionService();
-		TestingLeaderRetrievalService jobMasterLeaderRetrievalService = new TestingLeaderRetrievalService(
-			"localhost",
-			HighAvailabilityServices.DEFAULT_LEADER_ID);
-		TestingFatalErrorHandler testingFatalErrorHandler = new TestingFatalErrorHandler();
-		final ResourceManager resourceManager = createAndStartResourceManager(resourceManagerLeaderElectionService, jobID, jobMasterLeaderRetrievalService, testingFatalErrorHandler);
-		final UUID rmLeaderSessionId = grantResourceManagerLeadership(resourceManagerLeaderElectionService);
-		final UUID jmLeaderSessionId = grantResourceManagerLeadership(resourceManagerLeaderElectionService);
-		final ResourceID jmResourceId = new ResourceID(jobMasterAddress);
+    private void createAndRegisterJobMasterGateway() {
+        jobMasterGateway = new TestingJobMasterGatewayBuilder().build();
+        rpcService.registerGateway(jobMasterGateway.getAddress(), jobMasterGateway);
+        jobMasterLeaderRetrievalService =
+                new SettableLeaderRetrievalService(
+                        jobMasterGateway.getAddress(), jobMasterGateway.getFencingToken().toUUID());
+    }
 
-		// test throw exception when receive a registration from job master which takes invalid address
-		String invalidAddress = "/jobMasterAddress2";
-		Future<RegistrationResponse> invalidAddressFuture = resourceManager.registerJobManager(
-			rmLeaderSessionId,
-			jmLeaderSessionId,
-			jmResourceId,
-			invalidAddress,
-			jobID);
-		assertTrue(invalidAddressFuture.get(5, TimeUnit.SECONDS) instanceof RegistrationResponse.Decline);
+    private void createAndStartResourceManagerService() throws Exception {
+        final TestingLeaderElection leaderElection = new TestingLeaderElection();
+        resourceManagerService =
+                TestingResourceManagerService.newBuilder()
+                        .setRpcService(rpcService)
+                        .setJmLeaderRetrieverFunction(
+                                requestedJobId -> {
+                                    if (requestedJobId.equals(jobId)) {
+                                        return jobMasterLeaderRetrievalService;
+                                    } else {
+                                        throw new FlinkRuntimeException(
+                                                String.format("Unknown job id %s", jobId));
+                                    }
+                                })
+                        .setRmLeaderElection(leaderElection)
+                        .build();
 
-		if (testingFatalErrorHandler.hasExceptionOccurred()) {
-			testingFatalErrorHandler.rethrowError();
-		}
-	}
+        resourceManagerService.start();
+        resourceManagerService.isLeader(UUID.randomUUID()).join();
 
-	/**
-	 * Check and verify return RegistrationResponse.Decline when failed to start a job master Leader retrieval listener
-	 */
-	@Test
-	public void testRegisterJobMasterWithFailureLeaderListener() throws Exception {
-		String jobMasterAddress = "/jobMasterAddress1";
-		JobID jobID = mockJobMaster(jobMasterAddress);
-		TestingLeaderElectionService resourceManagerLeaderElectionService = new TestingLeaderElectionService();
-		TestingLeaderRetrievalService jobMasterLeaderRetrievalService = new TestingLeaderRetrievalService(
-			"localhost",
-			HighAvailabilityServices.DEFAULT_LEADER_ID);
-		TestingFatalErrorHandler testingFatalErrorHandler = new TestingFatalErrorHandler();
-		final ResourceManager resourceManager = createAndStartResourceManager(resourceManagerLeaderElectionService, jobID, jobMasterLeaderRetrievalService, testingFatalErrorHandler);
-		final UUID rmLeaderSessionId = grantResourceManagerLeadership(resourceManagerLeaderElectionService);
-		final UUID jmLeaderSessionId = grantResourceManagerLeadership(resourceManagerLeaderElectionService);
-		final ResourceID jmResourceId = new ResourceID(jobMasterAddress);
+        resourceManagerGateway =
+                resourceManagerService
+                        .getResourceManagerGateway()
+                        .orElseThrow(
+                                () ->
+                                        new AssertionError(
+                                                "RM not available after confirming leadership."));
+    }
 
-		JobID unknownJobIDToHAServices = new JobID();
-		// verify return RegistrationResponse.Decline when failed to start a job master Leader retrieval listener
-		Future<RegistrationResponse> declineFuture = resourceManager.registerJobManager(
-			rmLeaderSessionId,
-			jmLeaderSessionId,
-			jmResourceId,
-			jobMasterAddress,
-			unknownJobIDToHAServices);
-		RegistrationResponse response = declineFuture.get(5, TimeUnit.SECONDS);
-		assertTrue(response instanceof RegistrationResponse.Decline);
+    @AfterEach
+    void teardown() throws Exception {
+        if (resourceManagerService != null) {
+            resourceManagerService.rethrowFatalErrorIfAny();
+            resourceManagerService.cleanUp();
+        }
 
-		if (testingFatalErrorHandler.hasExceptionOccurred()) {
-			testingFatalErrorHandler.rethrowError();
-		}
-	}
+        if (rpcService != null) {
+            RpcUtils.terminateRpcService(rpcService);
+        }
+    }
 
-	private JobID mockJobMaster(String jobMasterAddress) {
-		JobID jobID = new JobID();
-		JobMasterGateway jobMasterGateway = mock(JobMasterGateway.class);
-		rpcService.registerGateway(jobMasterAddress, jobMasterGateway);
-		return jobID;
-	}
+    /**
+     * Test receive normal registration from job master and receive duplicate registration from job
+     * master.
+     */
+    @Test
+    void testRegisterJobMaster() {
+        // test response successful
+        CompletableFuture<RegistrationResponse> successfulFuture =
+                resourceManagerGateway.registerJobMaster(
+                        jobMasterGateway.getFencingToken(),
+                        jobMasterResourceId,
+                        jobMasterGateway.getAddress(),
+                        jobId,
+                        TIMEOUT);
+        assertThatFuture(successfulFuture)
+                .succeedsWithin(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)
+                .isInstanceOf(JobMasterRegistrationSuccess.class);
+    }
 
-	private ResourceManager createAndStartResourceManager(
-			TestingLeaderElectionService resourceManagerLeaderElectionService,
-			JobID jobID,
-			TestingLeaderRetrievalService jobMasterLeaderRetrievalService,
-			FatalErrorHandler fatalErrorHandler) throws Exception {
-		ResourceID rmResourceId = ResourceID.generate();
-		TestingHighAvailabilityServices highAvailabilityServices = new TestingHighAvailabilityServices();
-		highAvailabilityServices.setResourceManagerLeaderElectionService(resourceManagerLeaderElectionService);
-		highAvailabilityServices.setJobMasterLeaderRetriever(jobID, jobMasterLeaderRetrievalService);
+    @Test
+    void testDisconnectTaskManagerInResourceManager()
+            throws ExecutionException, InterruptedException, TimeoutException {
+        final ResourceID taskExecutorId = ResourceID.generate();
+        final CompletableFuture<Exception> disconnectRMFuture = new CompletableFuture<>();
+        final CompletableFuture<ResourceID> disconnectTMFuture = new CompletableFuture<>();
 
-		HeartbeatServices heartbeatServices = new HeartbeatServices(5L, 5L);
+        TestingJobMasterGateway jobMasterGateway =
+                new TestingJobMasterGatewayBuilder()
+                        .setDisconnectTaskManagerFunction(
+                                resourceID -> {
+                                    disconnectTMFuture.complete(resourceID);
+                                    return CompletableFuture.completedFuture(Acknowledge.get());
+                                })
+                        .setAddress("pekko.tcp://flink@localhost:6130/user/jobmanager2")
+                        .build();
+        rpcService.registerGateway(jobMasterGateway.getAddress(), jobMasterGateway);
+        ResourceManagerGateway resourceManagerGateway =
+                resourceManagerService
+                        .getResourceManagerGateway()
+                        .orElseThrow(
+                                () ->
+                                        new AssertionError(
+                                                "RM not available after confirming leadership."));
 
-		ResourceManagerConfiguration resourceManagerConfiguration = new ResourceManagerConfiguration(
-			Time.seconds(5L),
-			Time.seconds(5L));
-		MetricRegistry metricRegistry = mock(MetricRegistry.class);
-		JobLeaderIdService jobLeaderIdService = new JobLeaderIdService(
-			highAvailabilityServices,
-			rpcService.getScheduledExecutor(),
-			Time.minutes(5L));
-			
-		final SlotManager slotManager = new SlotManager(
-			rpcService.getScheduledExecutor(),
-			TestingUtils.infiniteTime(),
-			TestingUtils.infiniteTime(),
-			TestingUtils.infiniteTime());
+        // test response successful
+        CompletableFuture<RegistrationResponse> successfulFuture =
+                resourceManagerGateway.registerJobMaster(
+                        jobMasterGateway.getFencingToken(),
+                        jobMasterResourceId,
+                        jobMasterGateway.getAddress(),
+                        jobId,
+                        TIMEOUT);
+        assertThatFuture(successfulFuture)
+                .succeedsWithin(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)
+                .isInstanceOf(JobMasterRegistrationSuccess.class);
 
-		ResourceManager resourceManager = new StandaloneResourceManager(
-			rpcService,
-			FlinkResourceManager.RESOURCE_MANAGER_NAME,
-			rmResourceId,
-			resourceManagerConfiguration,
-			highAvailabilityServices,
-			heartbeatServices,
-			slotManager,
-			metricRegistry,
-			jobLeaderIdService,
-			fatalErrorHandler);
-		resourceManager.start();
-		return resourceManager;
-	}
+        final TaskExecutorGateway taskExecutorGateway =
+                new TestingTaskExecutorGatewayBuilder()
+                        .setAddress(UUID.randomUUID().toString())
+                        .setDisconnectResourceManagerConsumer(disconnectRMFuture::complete)
+                        .createTestingTaskExecutorGateway();
+        rpcService.registerGateway(taskExecutorGateway.getAddress(), taskExecutorGateway);
+        registerTaskExecutor(
+                resourceManagerGateway, taskExecutorId, taskExecutorGateway.getAddress());
 
-	private UUID grantResourceManagerLeadership(TestingLeaderElectionService resourceManagerLeaderElectionService) {
-		UUID leaderSessionId = UUID.randomUUID();
-		resourceManagerLeaderElectionService.isLeader(leaderSessionId);
-		return leaderSessionId;
-	}
+        resourceManagerGateway.disconnectTaskManager(taskExecutorId, new Exception("for test"));
+        assertThatFuture(disconnectRMFuture)
+                .succeedsWithin(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        final ResourceID resourceId =
+                disconnectTMFuture.get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        assertThat(resourceId).isEqualTo(taskExecutorId);
+    }
 
+    /** Test receive registration with unmatched leadershipId from job master. */
+    @Test
+    void testRegisterJobMasterWithUnmatchedLeaderSessionId1() throws Exception {
+        final ResourceManagerGateway wronglyFencedGateway =
+                rpcService
+                        .connect(
+                                resourceManagerGateway.getAddress(),
+                                ResourceManagerId.generate(),
+                                ResourceManagerGateway.class)
+                        .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+
+        // test throw exception when receive a registration from job master which takes unmatched
+        // leaderSessionId
+        CompletableFuture<RegistrationResponse> unMatchedLeaderFuture =
+                wronglyFencedGateway.registerJobMaster(
+                        jobMasterGateway.getFencingToken(),
+                        jobMasterResourceId,
+                        jobMasterGateway.getAddress(),
+                        jobId,
+                        TIMEOUT);
+        assertThatFuture(unMatchedLeaderFuture)
+                .withFailMessage("Should fail because we are using the wrong fencing token.")
+                .failsWithin(5L, TimeUnit.SECONDS)
+                .withThrowableOfType(ExecutionException.class)
+                .withCauseInstanceOf(FencingTokenException.class);
+    }
+
+    /** Test receive registration with unmatched leadershipId from job master. */
+    @Test
+    void testRegisterJobMasterWithUnmatchedLeaderSessionId2() {
+        // test throw exception when receive a registration from job master which takes unmatched
+        // leaderSessionId
+        JobMasterId differentJobMasterId = JobMasterId.generate();
+        CompletableFuture<RegistrationResponse> unMatchedLeaderFuture =
+                resourceManagerGateway.registerJobMaster(
+                        differentJobMasterId,
+                        jobMasterResourceId,
+                        jobMasterGateway.getAddress(),
+                        jobId,
+                        TIMEOUT);
+        assertThatFuture(unMatchedLeaderFuture)
+                .eventuallySucceeds()
+                .isInstanceOf(RegistrationResponse.Failure.class);
+    }
+
+    /** Test receive registration with invalid address from job master. */
+    @Test
+    void testRegisterJobMasterFromInvalidAddress() {
+        // test throw exception when receive a registration from job master which takes invalid
+        // address
+        String invalidAddress = "/jobMasterAddress2";
+        CompletableFuture<RegistrationResponse> invalidAddressFuture =
+                resourceManagerGateway.registerJobMaster(
+                        new JobMasterId(HighAvailabilityServices.DEFAULT_LEADER_ID),
+                        jobMasterResourceId,
+                        invalidAddress,
+                        jobId,
+                        TIMEOUT);
+        assertThatFuture(invalidAddressFuture)
+                .succeedsWithin(5, TimeUnit.SECONDS)
+                .isOfAnyClassIn(RegistrationResponse.Failure.class);
+    }
+
+    /**
+     * Check and verify return RegistrationResponse. Decline when failed to start a job master
+     * Leader retrieval listener.
+     */
+    @Test
+    void testRegisterJobMasterWithFailureLeaderListener() {
+        JobID unknownJobIDToHAServices = new JobID();
+
+        // this should fail because we try to register a job leader listener for an unknown job id
+        CompletableFuture<RegistrationResponse> registrationFuture =
+                resourceManagerGateway.registerJobMaster(
+                        jobMasterGateway.getFencingToken(),
+                        jobMasterResourceId,
+                        jobMasterGateway.getAddress(),
+                        unknownJobIDToHAServices,
+                        TIMEOUT);
+
+        assertThatFuture(registrationFuture)
+                .as("Expected to fail with a ResourceManagerException.")
+                .failsWithin(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)
+                .withThrowableOfType(ExecutionException.class)
+                .withCauseInstanceOf(ResourceManagerException.class);
+
+        // ignore the reported error
+        resourceManagerService.ignoreFatalErrors();
+    }
 }

@@ -19,134 +19,123 @@
 package org.apache.flink.runtime.memory;
 
 import org.apache.flink.core.memory.MemorySegment;
-import org.apache.flink.core.memory.MemoryType;
-import org.junit.Test;
+
+import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.ConcurrentModificationException;
 import java.util.Iterator;
 
-import static org.junit.Assert.*;
+/** Validate memory release under concurrent modification exceptions. */
+class MemoryManagerConcurrentModReleaseTest {
 
+    @Test
+    void testConcurrentModificationOnce() throws MemoryAllocationException {
+        final int numSegments = 10000;
+        final int segmentSize = 4096;
 
-public class MemoryManagerConcurrentModReleaseTest {
+        MemoryManager memMan =
+                MemoryManagerBuilder.newBuilder()
+                        .setMemorySize(numSegments * segmentSize)
+                        .setPageSize(segmentSize)
+                        .build();
 
-	@Test
-	public void testConcurrentModificationOnce() {
-		try {
-			final int numSegments = 10000;
-			final int segmentSize = 4096;
+        ArrayList<MemorySegment> segs = new ListWithConcModExceptionOnFirstAccess<>();
+        memMan.allocatePages(this, segs, numSegments);
 
-			MemoryManager memMan = new MemoryManager(numSegments * segmentSize, 1, segmentSize, MemoryType.HEAP, true);
+        memMan.release(segs);
+    }
 
-			ArrayList<MemorySegment> segs = new ListWithConcModExceptionOnFirstAccess<>();
-			memMan.allocatePages(this, segs, numSegments);
+    @Test
+    void testConcurrentModificationWhileReleasing() throws Exception {
+        final int numSegments = 10000;
+        final int segmentSize = 4096;
 
-			memMan.release(segs);
-		}
-		catch (Exception e) {
-			e.printStackTrace();
-			fail(e.getMessage());
-		}
-	}
-	
-	@Test
-	public void testConcurrentModificationWhileReleasing() {
-		try {
-			final int numSegments = 10000;
-			final int segmentSize = 4096;
-			
-			MemoryManager memMan = new MemoryManager(numSegments * segmentSize, 1, segmentSize, MemoryType.HEAP, true);
-			
-			ArrayList<MemorySegment> segs = new ArrayList<>(numSegments);
-			memMan.allocatePages(this, segs, numSegments);
-			
-			// start a thread that performs concurrent modifications
-			Modifier mod = new Modifier(segs);
-			Thread modRunner = new Thread(mod);
-			modRunner.start();
-			
-			// give the thread some time to start working
-			Thread.sleep(500);
-			
-			try {
-				memMan.release(segs);
-			}
-			finally {
-				mod.cancel();
-			}
-			
-			modRunner.join();
-		}
-		catch (Exception e) {
-			e.printStackTrace();
-			fail(e.getMessage());
-		}
-	}
-	
-	private class Modifier implements Runnable {
-		
-		private final ArrayList<MemorySegment> toModify;
-		
-		private volatile boolean running = true;
+        MemoryManager memMan =
+                MemoryManagerBuilder.newBuilder()
+                        .setMemorySize(numSegments * segmentSize)
+                        .setPageSize(segmentSize)
+                        .build();
 
-		
-		private Modifier(ArrayList<MemorySegment> toModify) {
-			this.toModify = toModify;
-		}
+        ArrayList<MemorySegment> segs = new ArrayList<>(numSegments);
+        memMan.allocatePages(this, segs, numSegments);
 
-		public void cancel() {
-			running = false;
-		}
+        // start a thread that performs concurrent modifications
+        Modifier mod = new Modifier(segs);
+        Thread modRunner = new Thread(mod);
+        modRunner.start();
 
-		@Override
-		public void run() {
-			while (running) {
-				try {
-					MemorySegment seg = toModify.remove(0);
-					toModify.add(seg);
-				}
-				catch (IndexOutOfBoundsException e) {
-					// may happen, just retry
-				}
-			}
-		}
-	}
-	
-	private class ListWithConcModExceptionOnFirstAccess<E> extends ArrayList<E> {
+        // give the thread some time to start working
+        Thread.sleep(500);
 
-		private static final long serialVersionUID = -1623249699823349781L;
-		
-		private boolean returnedIterator;
-		
-		@Override
-		public Iterator<E> iterator() {
-			if (returnedIterator) {
-				return super.iterator();
-			}
-			else {
-				returnedIterator = true;
-				return new ConcFailingIterator<>();
-			}
-		}
-	}
-	
-	
-	private class ConcFailingIterator<E> implements Iterator<E> {
+        try {
+            memMan.release(segs);
+        } finally {
+            mod.cancel();
+        }
 
-		@Override
-		public boolean hasNext() {
-			return true;
-		}
+        modRunner.join();
+    }
 
-		@Override
-		public E next() {
-			throw new ConcurrentModificationException();
-		}
+    private static class Modifier implements Runnable {
 
-		@Override
-		public void remove() {
-			throw new UnsupportedOperationException();
-		}
-	}
+        private final ArrayList<MemorySegment> toModify;
+
+        private volatile boolean running = true;
+
+        private Modifier(ArrayList<MemorySegment> toModify) {
+            this.toModify = toModify;
+        }
+
+        public void cancel() {
+            running = false;
+        }
+
+        @Override
+        public void run() {
+            while (running) {
+                try {
+                    MemorySegment seg = toModify.remove(0);
+                    toModify.add(seg);
+                } catch (IndexOutOfBoundsException e) {
+                    // may happen, just retry
+                }
+            }
+        }
+    }
+
+    private class ListWithConcModExceptionOnFirstAccess<E> extends ArrayList<E> {
+
+        private static final long serialVersionUID = -1623249699823349781L;
+
+        private boolean returnedIterator;
+
+        @Override
+        public Iterator<E> iterator() {
+            if (returnedIterator) {
+                return super.iterator();
+            } else {
+                returnedIterator = true;
+                return new ConcFailingIterator<>();
+            }
+        }
+    }
+
+    private static class ConcFailingIterator<E> implements Iterator<E> {
+
+        @Override
+        public boolean hasNext() {
+            return true;
+        }
+
+        @Override
+        public E next() {
+            throw new ConcurrentModificationException();
+        }
+
+        @Override
+        public void remove() {
+            throw new UnsupportedOperationException();
+        }
+    }
 }

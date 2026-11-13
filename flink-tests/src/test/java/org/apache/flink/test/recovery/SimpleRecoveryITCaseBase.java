@@ -18,246 +18,210 @@
 
 package org.apache.flink.test.recovery;
 
-import org.apache.flink.api.common.JobExecutionResult;
+import org.apache.flink.api.common.RuntimeExecutionMode;
 import org.apache.flink.api.common.functions.ReduceFunction;
 import org.apache.flink.api.common.functions.RichMapFunction;
-import org.apache.flink.api.common.restartstrategy.RestartStrategies;
-import org.apache.flink.api.java.ExecutionEnvironment;
-import org.apache.flink.api.java.io.LocalCollectionOutputFormat;
-import org.apache.flink.client.program.ProgramInvocationException;
-import org.apache.flink.runtime.client.JobExecutionException;
-import org.apache.flink.runtime.minicluster.LocalFlinkMiniCluster;
-import org.junit.AfterClass;
-import org.junit.Test;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.RestartStrategyOptions;
+import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.test.junit5.MiniClusterExtension;
+import org.apache.flink.util.CloseableIterator;
+import org.apache.flink.util.CollectionUtil;
+import org.apache.flink.util.TestLoggerExtension;
 
-import java.util.ArrayList;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.extension.RegisterExtension;
+
 import java.util.List;
 
-import static org.junit.Assert.*;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.fail;
 
 /**
- * A series of tests (reusing one FlinkMiniCluster) where tasks fail (one or more time)
- * and the recovery should restart them to verify job completion.
+ * A series of tests (reusing one MiniCluster) where tasks fail (one or more time) and the recovery
+ * should restart them to verify job completion.
  */
-@SuppressWarnings("serial")
-public abstract class SimpleRecoveryITCaseBase {
+@ExtendWith(TestLoggerExtension.class)
+abstract class SimpleRecoveryITCaseBase {
 
-	protected static LocalFlinkMiniCluster cluster;
+    private static final int PARALLELISM = 4;
+    private static final int DATA_FROM = 1;
+    private static final int DATA_TO = PARALLELISM * PARALLELISM;
+    private static final int EXPECTED_SUM = (DATA_FROM + DATA_TO) * (DATA_TO - DATA_FROM + 1) / 2;
 
-	@AfterClass
-	public static void teardownCluster() {
-		try {
-			cluster.stop();
-		}
-		catch (Throwable t) {
-			System.err.println("Error stopping cluster on shutdown");
-			t.printStackTrace();
-			fail("ClusterClient shutdown caused an exception: " + t.getMessage());
-		}
-	}
+    @RegisterExtension
+    private static final MiniClusterExtension MINI_CLUSTER_EXTENSION =
+            new MiniClusterExtension(
+                    new MiniClusterResourceConfiguration.Builder()
+                            .setNumberTaskManagers(4)
+                            .setNumberSlotsPerTaskManager(1)
+                            .build());
 
-	@Test
-	public void testFailedRunThenSuccessfulRun() {
+    @Test
+    void testFailedRunThenSuccessfulRun() throws Exception {
+        try {
+            // attempt 1
+            {
+                StreamExecutionEnvironment env =
+                        StreamExecutionEnvironment.getExecutionEnvironment();
+                env.setRuntimeMode(RuntimeExecutionMode.BATCH);
 
-		try {
-			List<Long> resultCollection = new ArrayList<Long>();
+                env.setParallelism(PARALLELISM);
+                Configuration configuration = new Configuration();
+                configuration.set(RestartStrategyOptions.RESTART_STRATEGY, "none");
+                env.configure(configuration, Thread.currentThread().getContextClassLoader());
 
-			// attempt 1
-			{
-				ExecutionEnvironment env = ExecutionEnvironment.createRemoteEnvironment(
-						"localhost", cluster.getLeaderRPCPort());
+                try {
+                    CloseableIterator<Long> iterator =
+                            env.fromSequence(DATA_FROM, DATA_TO)
+                                    .rebalance()
+                                    .map(new FailingMapper1<>())
+                                    .fullWindowPartition()
+                                    .reduce(Long::sum)
+                                    .executeAndCollect();
+                    CollectionUtil.iteratorToList(iterator);
+                    fail("The program should have failed, but run successfully");
+                } catch (RuntimeException e) {
+                    // expected
+                }
+            }
 
-				env.setParallelism(4);
-				env.setRestartStrategy(RestartStrategies.noRestart());
-				env.getConfig().disableSysoutLogging();
+            // attempt 2
+            {
+                StreamExecutionEnvironment env =
+                        StreamExecutionEnvironment.getExecutionEnvironment();
+                env.setRuntimeMode(RuntimeExecutionMode.BATCH);
 
-				env.generateSequence(1, 10)
-						.rebalance()
-						.map(new FailingMapper1<Long>())
-						.reduce(new ReduceFunction<Long>() {
-							@Override
-							public Long reduce(Long value1, Long value2) {
-								return value1 + value2;
-							}
-						})
-						.output(new LocalCollectionOutputFormat<Long>(resultCollection));
+                env.setParallelism(PARALLELISM);
+                Configuration configuration = new Configuration();
+                configuration.set(RestartStrategyOptions.RESTART_STRATEGY, "none");
+                env.configure(configuration, Thread.currentThread().getContextClassLoader());
 
-				try {
-					JobExecutionResult res = env.execute();
-					String msg = res == null ? "null result" : "result in " + res.getNetRuntime() + " ms";
-					fail("The program should have failed, but returned " + msg);
-				}
-				catch (ProgramInvocationException e) {
-					// expected
-				}
-			}
+                List<Long> resultCollection =
+                        CollectionUtil.iteratorToList(
+                                env.fromSequence(DATA_FROM, DATA_TO)
+                                        .rebalance()
+                                        .map(new FailingMapper1<>())
+                                        .fullWindowPartition()
+                                        .reduce((ReduceFunction<Long>) Long::sum)
+                                        .executeAndCollect());
 
-			// attempt 2
-			{
-				ExecutionEnvironment env = ExecutionEnvironment.createRemoteEnvironment(
-						"localhost", cluster.getLeaderRPCPort());
+                long sum = 0;
+                for (long l : resultCollection) {
+                    sum += l;
+                }
+                assertThat(sum).isEqualTo(EXPECTED_SUM);
+            }
 
-				env.setParallelism(4);
-				env.setRestartStrategy(RestartStrategies.noRestart());
-				env.getConfig().disableSysoutLogging();
-
-				env.generateSequence(1, 10)
-						.rebalance()
-						.map(new FailingMapper1<Long>())
-						.reduce(new ReduceFunction<Long>() {
-							@Override
-							public Long reduce(Long value1, Long value2) {
-								return value1 + value2;
-							}
-						})
-						.output(new LocalCollectionOutputFormat<Long>(resultCollection));
-
-				executeAndRunAssertions(env);
-
-				long sum = 0;
-				for (long l : resultCollection) {
-					sum += l;
-				}
-				assertEquals(55, sum);
-			}
-
-		}
-		catch (Exception e) {
-			e.printStackTrace();
-			fail(e.getMessage());
-		}
-	}
-
-	private void executeAndRunAssertions(ExecutionEnvironment env) throws Exception {
-		try {
-            JobExecutionResult result = env.execute();
-            assertTrue(result.getNetRuntime() >= 0);
-            assertNotNull(result.getAllAccumulatorResults());
-            assertTrue(result.getAllAccumulatorResults().isEmpty());
+        } finally {
+            FailingMapper1.failuresBeforeSuccess = 1;
         }
-        catch (JobExecutionException e) {
-            fail("The program should have succeeded on the second run");
+    }
+
+    @Test
+    void testRestart() throws Exception {
+        try {
+            StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+            env.setRuntimeMode(RuntimeExecutionMode.BATCH);
+
+            env.setParallelism(PARALLELISM);
+            // the default restart strategy should be taken
+
+            List<Long> resultCollection =
+                    CollectionUtil.iteratorToList(
+                            env.fromSequence(DATA_FROM, DATA_TO)
+                                    .rebalance()
+                                    .map(new FailingMapper2<>())
+                                    .fullWindowPartition()
+                                    .reduce(Long::sum)
+                                    .executeAndCollect());
+
+            long sum = 0;
+            for (long l : resultCollection) {
+                sum += l;
+            }
+            assertThat(sum).isEqualTo(EXPECTED_SUM);
+        } finally {
+            FailingMapper2.failuresBeforeSuccess = 1;
         }
-	}
+    }
 
-	@Test
-	public void testRestart() {
-		try {
-			List<Long> resultCollection = new ArrayList<Long>();
+    @Test
+    void testRestartMultipleTimes() throws Exception {
+        try {
+            StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+            env.setRuntimeMode(RuntimeExecutionMode.BATCH);
 
-			ExecutionEnvironment env = ExecutionEnvironment.createRemoteEnvironment(
-					"localhost", cluster.getLeaderRPCPort());
+            env.setParallelism(PARALLELISM);
 
-			env.setParallelism(4);
-			// the default restart strategy should be taken
-			env.getConfig().disableSysoutLogging();
+            List<Long> resultCollection =
+                    CollectionUtil.iteratorToList(
+                            env.fromSequence(DATA_FROM, DATA_TO)
+                                    .rebalance()
+                                    .map(new FailingMapper3<>())
+                                    .fullWindowPartition()
+                                    .reduce(Long::sum)
+                                    .executeAndCollect());
 
-			env.generateSequence(1, 10)
-					.rebalance()
-					.map(new FailingMapper2<Long>())
-					.reduce(new ReduceFunction<Long>() {
-						@Override
-						public Long reduce(Long value1, Long value2) {
-							return value1 + value2;
-						}
-					})
-					.output(new LocalCollectionOutputFormat<Long>(resultCollection));
+            long sum = 0;
+            for (long l : resultCollection) {
+                sum += l;
+            }
+            assertThat(sum).isEqualTo(EXPECTED_SUM);
+        } finally {
+            FailingMapper3.failuresBeforeSuccess = 3;
+        }
+    }
 
-			executeAndRunAssertions(env);
+    // ------------------------------------------------------------------------------------
 
-			long sum = 0;
-			for (long l : resultCollection) {
-				sum += l;
-			}
-			assertEquals(55, sum);
-		}
-		catch (Exception e) {
-			e.printStackTrace();
-			fail(e.getMessage());
-		}
-	}
+    private static class FailingMapper1<T> extends RichMapFunction<T, T> {
 
-	@Test
-	public void testRestartMultipleTimes() {
-		try {
-			List<Long> resultCollection = new ArrayList<Long>();
+        private static volatile int failuresBeforeSuccess = 1;
 
-			ExecutionEnvironment env = ExecutionEnvironment.createRemoteEnvironment(
-					"localhost", cluster.getLeaderRPCPort());
+        @Override
+        public T map(T value) throws Exception {
+            if (failuresBeforeSuccess > 0
+                    && getRuntimeContext().getTaskInfo().getIndexOfThisSubtask() == 0) {
+                failuresBeforeSuccess--;
+                throw new Exception("Test Failure");
+            }
 
-			env.setParallelism(4);
-			env.setRestartStrategy(RestartStrategies.fixedDelayRestart(5, 100));
-			env.getConfig().disableSysoutLogging();
+            return value;
+        }
+    }
 
-			env.generateSequence(1, 10)
-					.rebalance()
-					.map(new FailingMapper3<Long>())
-					.reduce(new ReduceFunction<Long>() {
-						@Override
-						public Long reduce(Long value1, Long value2) {
-							return value1 + value2;
-						}
-					})
-					.output(new LocalCollectionOutputFormat<Long>(resultCollection));
+    private static class FailingMapper2<T> extends RichMapFunction<T, T> {
 
-			executeAndRunAssertions(env);
+        private static volatile int failuresBeforeSuccess = 1;
 
-			long sum = 0;
-			for (long l : resultCollection) {
-				sum += l;
-			}
-			assertEquals(55, sum);
-		}
-		catch (Exception e) {
-			e.printStackTrace();
-			fail(e.getMessage());
-		}
-	}
+        @Override
+        public T map(T value) throws Exception {
+            if (failuresBeforeSuccess > 0
+                    && getRuntimeContext().getTaskInfo().getIndexOfThisSubtask() == 1) {
+                failuresBeforeSuccess--;
+                throw new Exception("Test Failure");
+            }
 
-	// ------------------------------------------------------------------------------------
+            return value;
+        }
+    }
 
-	private static class FailingMapper1<T> extends RichMapFunction<T, T> {
+    private static class FailingMapper3<T> extends RichMapFunction<T, T> {
 
-		private static volatile int failuresBeforeSuccess = 1;
+        private static volatile int failuresBeforeSuccess = 3;
 
-		@Override
-		public T map(T value) throws Exception {
-			if (failuresBeforeSuccess > 0 && getRuntimeContext().getIndexOfThisSubtask() == 1) {
-				failuresBeforeSuccess--;
-				throw new Exception("Test Failure");
-			}
+        @Override
+        public T map(T value) throws Exception {
+            if (failuresBeforeSuccess > 0
+                    && getRuntimeContext().getTaskInfo().getIndexOfThisSubtask() == 1) {
+                failuresBeforeSuccess--;
+                throw new Exception("Test Failure");
+            }
 
-			return value;
-		}
-	}
-
-	private static class FailingMapper2<T> extends RichMapFunction<T, T> {
-
-		private static volatile int failuresBeforeSuccess = 1;
-
-		@Override
-		public T map(T value) throws Exception {
-			if (failuresBeforeSuccess > 0 && getRuntimeContext().getIndexOfThisSubtask() == 1) {
-				failuresBeforeSuccess--;
-				throw new Exception("Test Failure");
-			}
-
-			return value;
-		}
-	}
-
-	private static class FailingMapper3<T> extends RichMapFunction<T, T> {
-
-		private static volatile int failuresBeforeSuccess = 3;
-
-		@Override
-		public T map(T value) throws Exception {
-			if (failuresBeforeSuccess > 0 && getRuntimeContext().getIndexOfThisSubtask() == 1) {
-				failuresBeforeSuccess--;
-				throw new Exception("Test Failure");
-			}
-
-			return value;
-		}
-	}
+            return value;
+        }
+    }
 }

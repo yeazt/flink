@@ -18,45 +18,98 @@
 
 package org.apache.flink.test.completeness;
 
-import java.lang.reflect.Modifier;
-import java.util.Set;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeutils.TypeInformationTestBase;
-import org.apache.flink.util.TestLogger;
-import static org.junit.Assert.assertTrue;
-import org.junit.Test;
+import org.apache.flink.formats.avro.typeutils.AvroTypeInfo;
+import org.apache.flink.formats.avro.typeutils.GenericRecordAvroTypeInfo;
+import org.apache.flink.table.dataview.ListViewTypeInfo;
+import org.apache.flink.table.dataview.MapViewTypeInfo;
+import org.apache.flink.table.runtime.typeutils.BigDecimalTypeInfo;
+import org.apache.flink.table.runtime.typeutils.DecimalDataTypeInfo;
+import org.apache.flink.table.runtime.typeutils.ExternalTypeInfo;
+import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
+import org.apache.flink.table.runtime.typeutils.LegacyInstantTypeInfo;
+import org.apache.flink.table.runtime.typeutils.LegacyLocalDateTimeTypeInfo;
+import org.apache.flink.table.runtime.typeutils.LegacyTimestampTypeInfo;
+import org.apache.flink.table.runtime.typeutils.SortedMapTypeInfo;
+import org.apache.flink.table.runtime.typeutils.StringDataTypeInfo;
+import org.apache.flink.table.runtime.typeutils.TimestampDataTypeInfo;
+import org.apache.flink.table.typeutils.TimeIndicatorTypeInfo;
+import org.apache.flink.table.typeutils.TimeIntervalTypeInfo;
+import org.apache.flink.util.TestLoggerExtension;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.reflections.Reflections;
 
-/**
- * Scans the class path for type information and checks if there is a test for it.
- */
-public class TypeInfoTestCoverageTest extends TestLogger {
+import java.lang.reflect.Modifier;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
 
-	@Test
-	public void testTypeInfoTestCoverage() {
-		Reflections reflections = new Reflections("org.apache.flink");
+import static org.junit.jupiter.api.Assertions.fail;
 
-		Set<Class<? extends TypeInformation>> typeInfos = reflections.getSubTypesOf(TypeInformation.class);
-		Set<Class<? extends TypeInformationTestBase>> typeInfoTests = reflections.getSubTypesOf(TypeInformationTestBase.class);
+/** Scans the class path for type information and checks if there is a test for it. */
+@ExtendWith(TestLoggerExtension.class)
+class TypeInfoTestCoverageTest {
 
-		// check if a test exists for each type information
-		for (Class<? extends TypeInformation> typeInfo : typeInfos) {
-			// we skip abstract classes and inner classes to skip type information defined in test classes
-			if (Modifier.isAbstract(typeInfo.getModifiers()) ||
-					Modifier.isPrivate(typeInfo.getModifiers()) ||
-					typeInfo.getName().contains("Test$") ||
-					typeInfo.getName().contains("TestBase$") ||
-					typeInfo.getName().contains("ITCase$") ||
-					typeInfo.getName().contains("$$anon")) {
-				continue;
-			}
-			boolean found = false;
-			for (Class<? extends TypeInformationTestBase> typeInfoTest : typeInfoTests) {
-				if (typeInfoTest.getName().equals(typeInfo.getName() + "Test")) {
-					found = true;
-				}
-			}
-			assertTrue("Could not find test that corresponds to " + typeInfo.getName(), found);
-		}
-	}
+    @Test
+    void testTypeInfoTestCoverage() {
+        Reflections reflections = new Reflections("org.apache.flink");
+
+        Set<Class<? extends TypeInformation>> typeInfos =
+                reflections.getSubTypesOf(TypeInformation.class);
+
+        Set<String> typeInfoTestNames =
+                reflections.getSubTypesOf(TypeInformationTestBase.class).stream()
+                        .map(Class::getName)
+                        .collect(Collectors.toSet());
+
+        //  type info whitelist for TypeInformationTestBase test coverage (see FLINK-27725)
+        final List<String> typeInfoTestBaseWhitelist =
+                Arrays.asList(
+                        LegacyTimestampTypeInfo.class.getName(),
+                        InternalTypeInfo.class.getName(),
+                        LegacyLocalDateTimeTypeInfo.class.getName(),
+                        TimeIntervalTypeInfo.class.getName(),
+                        TimeIndicatorTypeInfo.class.getName(),
+                        TimestampDataTypeInfo.class.getName(),
+                        MapViewTypeInfo.class.getName(),
+                        LegacyInstantTypeInfo.class.getName(),
+                        ListViewTypeInfo.class.getName(),
+                        StringDataTypeInfo.class.getName(),
+                        SortedMapTypeInfo.class.getName(),
+                        ExternalTypeInfo.class.getName(),
+                        BigDecimalTypeInfo.class.getName(),
+                        DecimalDataTypeInfo.class.getName(),
+                        GenericRecordAvroTypeInfo.class.getName(),
+                        AvroTypeInfo.class.getName());
+
+        // check if a test exists for each type information
+        for (Class<? extends TypeInformation> typeInfo : typeInfos) {
+            // we skip abstract classes and inner classes to skip type information defined in test
+            // classes
+            if (Modifier.isAbstract(typeInfo.getModifiers())
+                    || Modifier.isPrivate(typeInfo.getModifiers())
+                    || typeInfo.getName().contains("Test$")
+                    || typeInfo.getName().contains("TestBase$")
+                    || typeInfo.getName().contains("ITCase$")
+                    || typeInfo.getName().contains("$$anon")
+                    || typeInfo.getName().contains("queryablestate")) {
+                continue;
+            }
+
+            final String testToFind = typeInfo.getName() + "Test";
+            if (!typeInfoTestNames.contains(testToFind)
+                    && !typeInfoTestBaseWhitelist.contains(typeInfo.getName())) {
+                fail(
+                        "Could not find test '"
+                                + testToFind
+                                + "' that covers '"
+                                + typeInfo.getName()
+                                + "'.");
+            }
+        }
+    }
 }

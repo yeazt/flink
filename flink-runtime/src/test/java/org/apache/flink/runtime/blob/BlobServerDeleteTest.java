@@ -18,358 +18,454 @@
 
 package org.apache.flink.runtime.blob;
 
-import org.apache.flink.configuration.Configuration;
+import org.apache.flink.api.common.ApplicationID;
 import org.apache.flink.api.common.JobID;
-import org.apache.flink.runtime.concurrent.Future;
-import org.apache.flink.runtime.concurrent.FutureUtils;
-import org.apache.flink.runtime.concurrent.impl.FlinkCompletableFuture;
+import org.apache.flink.util.FlinkException;
 import org.apache.flink.util.OperatingSystem;
-import org.apache.flink.util.TestLogger;
-import org.junit.Test;
+import org.apache.flink.util.Preconditions;
+import org.apache.flink.util.concurrent.FutureUtils;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import javax.annotation.Nullable;
 
 import java.io.File;
 import java.io.IOException;
-import java.net.InetSocketAddress;
+import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
-import java.util.concurrent.Callable;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
-import static org.junit.Assume.assumeTrue;
-import static org.mockito.Mockito.mock;
+import static org.apache.flink.runtime.blob.BlobKey.BlobType.PERMANENT_BLOB;
+import static org.apache.flink.runtime.blob.BlobKey.BlobType.TRANSIENT_BLOB;
+import static org.apache.flink.runtime.blob.BlobKeyTest.verifyKeyDifferentHashEquals;
+import static org.apache.flink.runtime.blob.BlobServerGetTest.verifyDeleted;
+import static org.apache.flink.runtime.blob.BlobServerPutTest.put;
+import static org.apache.flink.runtime.blob.BlobServerPutTest.verifyContents;
+import static org.apache.flink.runtime.blob.TestingBlobHelpers.checkFileCountForApplication;
+import static org.apache.flink.runtime.blob.TestingBlobHelpers.checkFileCountForJob;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assumptions.assumeThat;
 
-/**
- * Tests how DELETE requests behave.
- */
-public class BlobServerDeleteTest extends TestLogger {
+/** Tests how DELETE requests behave. */
+class BlobServerDeleteTest {
 
-	private final Random rnd = new Random();
+    private final Random rnd = new Random();
 
-	@Test
-	public void testDeleteSingle() {
-		BlobServer server = null;
-		BlobClient client = null;
-		BlobStore blobStore = new VoidBlobStore();
+    @TempDir private Path tempDir;
 
-		try {
-			Configuration config = new Configuration();
-			server = new BlobServer(config, blobStore);
+    @Test
+    void testDeleteTransient1() throws IOException {
+        testDeleteBlob(null, new JobID(), TRANSIENT_BLOB);
+    }
 
-			InetSocketAddress serverAddress = new InetSocketAddress("localhost", server.getPort());
-			client = new BlobClient(serverAddress, config);
+    @Test
+    void testDeleteTransient2() throws IOException {
+        testDeleteBlob(new JobID(), null, TRANSIENT_BLOB);
+    }
 
-			byte[] data = new byte[2000000];
-			rnd.nextBytes(data);
+    @Test
+    void testDeleteTransient3() throws IOException {
+        testDeleteBlob(null, null, TRANSIENT_BLOB);
+    }
 
-			// put content addressable (like libraries)
-			BlobKey key = client.put(data);
-			assertNotNull(key);
+    @Test
+    void testDeleteTransient4() throws IOException {
+        testDeleteBlob(new JobID(), new JobID(), TRANSIENT_BLOB);
+    }
 
-			// issue a DELETE request
-			client.delete(key);
-			client.close();
+    @Test
+    void testDeleteTransient5() throws IOException {
+        JobID jobId = new JobID();
+        testDeleteBlob(jobId, jobId, TRANSIENT_BLOB);
+    }
 
-			client = new BlobClient(serverAddress, config);
-			try {
-				client.get(key);
-				fail("BLOB should have been deleted");
-			}
-			catch (IOException e) {
-				// expected
-			}
+    @Test
+    void testDeletePermanent() throws IOException {
+        testDeleteBlob(new JobID(), new JobID(), PERMANENT_BLOB);
+    }
 
-			try {
-				client.put(new byte[1]);
-				fail("client should be closed after erroneous operation");
-			}
-			catch (IllegalStateException e) {
-				// expected
-			}
-		}
-		catch (Exception e) {
-			e.printStackTrace();
-			fail(e.getMessage());
-		}
-		finally {
-			cleanup(server, client);
-		}
-	}
+    /**
+     * Uploads a (different) byte array for each of the given jobs and verifies that deleting one of
+     * them (via the {@link BlobServer}) does not influence the other.
+     *
+     * @param jobId1 first job id
+     * @param jobId2 second job id
+     */
+    private void testDeleteBlob(
+            @Nullable JobID jobId1, @Nullable JobID jobId2, BlobKey.BlobType blobType)
+            throws IOException {
 
-	@Test
-	public void testDeleteAll() {
-		BlobServer server = null;
-		BlobClient client = null;
-		BlobStore blobStore = new VoidBlobStore();
+        try (BlobServer server = TestingBlobUtils.createServer(tempDir)) {
+            server.start();
 
-		try {
-			Configuration config = new Configuration();
-			server = new BlobServer(config, blobStore);
+            byte[] data = new byte[2000000];
+            rnd.nextBytes(data);
+            byte[] data2 = Arrays.copyOf(data, data.length);
+            data2[0] ^= 1;
 
-			InetSocketAddress serverAddress = new InetSocketAddress("localhost", server.getPort());
-			client = new BlobClient(serverAddress, config);
+            // put first BLOB
+            BlobKey key1 = put(server, jobId1, data, blobType);
+            assertThat(key1).isNotNull();
 
-			byte[] data = new byte[2000000];
-			rnd.nextBytes(data);
+            // put two more BLOBs (same key, other key) for another job ID
+            BlobKey key2a = put(server, jobId2, data, blobType);
+            assertThat(key2a).isNotNull();
+            verifyKeyDifferentHashEquals(key1, key2a);
+            BlobKey key2b = put(server, jobId2, data2, blobType);
+            assertThat(key2b).isNotNull();
 
-			JobID jobID = new JobID();
-			String name1 = "random name";
-			String name2 = "any nyme";
+            // issue a DELETE request
+            assertThat(delete(server, jobId1, key1, blobType)).isTrue();
 
-			// put content addressable (like libraries)
-			client.put(jobID, name1, data);
-			client.put(jobID, name2, new byte[712]);
+            verifyDeleted(server, jobId1, key1);
+            // deleting a one BLOB should not affect another BLOB with a different key
+            // (and keys are always different now)
+            verifyContents(server, jobId2, key2a, data);
+            verifyContents(server, jobId2, key2b, data2);
 
+            // delete first file of second job
+            assertThat(delete(server, jobId2, key2a, blobType)).isTrue();
+            verifyDeleted(server, jobId2, key2a);
+            verifyContents(server, jobId2, key2b, data2);
 
-			// issue a DELETE ALL request
-			client.deleteAll(jobID);
-			client.close();
+            // delete second file of second job
+            assertThat(delete(server, jobId2, key2b, blobType)).isTrue();
+            verifyDeleted(server, jobId2, key2b);
+        }
+    }
 
-			client = new BlobClient(serverAddress, config);
-			try {
-				client.get(jobID, name1);
-				fail("BLOB should have been deleted");
-			}
-			catch (IOException e) {
-				// expected
-			}
+    @Test
+    void testDeleteTransientAlreadyDeletedNoJob() throws IOException {
+        testDeleteBlobAlreadyDeleted(null, TRANSIENT_BLOB);
+    }
 
-			try {
-				client.put(new byte[1]);
-				fail("client should be closed after erroneous operation");
-			}
-			catch (IllegalStateException e) {
-				// expected
-			}
+    @Test
+    void testDeleteTransientAlreadyDeletedForJob() throws IOException {
+        testDeleteBlobAlreadyDeleted(new JobID(), TRANSIENT_BLOB);
+    }
 
-			client = new BlobClient(serverAddress, config);
-			try {
-				client.get(jobID, name2);
-				fail("BLOB should have been deleted");
-			}
-			catch (IOException e) {
-				// expected
-			}
-		}
-		catch (Exception e) {
-			e.printStackTrace();
-			fail(e.getMessage());
-		}
-		finally {
-			cleanup(server, client);
-		}
-	}
+    @Test
+    void testDeletePermanentAlreadyDeletedForJob() throws IOException {
+        testDeleteBlobAlreadyDeleted(new JobID(), PERMANENT_BLOB);
+    }
 
-	@Test
-	public void testDeleteAlreadyDeletedByBlobKey() {
-		BlobServer server = null;
-		BlobClient client = null;
-		BlobStore blobStore = new VoidBlobStore();
+    /**
+     * Uploads a byte array for the given job and verifies that deleting it (via the {@link
+     * BlobServer}) does not fail independent of whether the file exists.
+     *
+     * @param jobId job id
+     */
+    private void testDeleteBlobAlreadyDeleted(
+            @Nullable final JobID jobId, BlobKey.BlobType blobType) throws IOException {
 
-		try {
-			Configuration config = new Configuration();
-			server = new BlobServer(config, blobStore);
+        try (BlobServer server = TestingBlobUtils.createServer(tempDir)) {
+            server.start();
 
-			InetSocketAddress serverAddress = new InetSocketAddress("localhost", server.getPort());
-			client = new BlobClient(serverAddress, config);
+            byte[] data = new byte[2000000];
+            rnd.nextBytes(data);
 
-			byte[] data = new byte[2000000];
-			rnd.nextBytes(data);
+            // put BLOB
+            BlobKey key = put(server, jobId, data, blobType);
+            assertThat(key).isNotNull();
 
-			// put content addressable (like libraries)
-			BlobKey key = client.put(data);
-			assertNotNull(key);
+            File blobFile = server.getStorageLocation(jobId, key);
+            assertThat(blobFile.delete()).isTrue();
 
-			File blobFile = server.getStorageLocation(key);
-			assertTrue(blobFile.delete());
+            // DELETE operation should not fail if file is already deleted
+            assertThat(delete(server, jobId, key, blobType)).isTrue();
+            verifyDeleted(server, jobId, key);
 
-			// issue a DELETE request
-			try {
-				client.delete(key);
-			}
-			catch (IOException e) {
-				fail("DELETE operation should not fail if file is already deleted");
-			}
-		}
-		catch (Exception e) {
-			e.printStackTrace();
-			fail(e.getMessage());
-		}
-		finally {
-			cleanup(server, client);
-		}
-	}
+            // one more delete call that should not fail
+            assertThat(delete(server, jobId, key, blobType)).isTrue();
+            verifyDeleted(server, jobId, key);
+        }
+    }
 
-	@Test
-	public void testDeleteAlreadyDeletedByName() {
-		BlobServer server = null;
-		BlobClient client = null;
-		BlobStore blobStore = new VoidBlobStore();
+    @Test
+    void testDeleteTransientFailsNoJob() throws IOException {
+        testDeleteBlobFails(null, TRANSIENT_BLOB);
+    }
 
-		try {
-			Configuration config = new Configuration();
-			server = new BlobServer(config, blobStore);
+    @Test
+    void testDeleteTransientFailsForJob() throws IOException {
+        testDeleteBlobFails(new JobID(), TRANSIENT_BLOB);
+    }
 
-			InetSocketAddress serverAddress = new InetSocketAddress("localhost", server.getPort());
-			client = new BlobClient(serverAddress, config);
+    @Test
+    void testDeletePermanentFailsForJob() throws IOException {
+        testDeleteBlobFails(new JobID(), PERMANENT_BLOB);
+    }
 
-			byte[] data = new byte[2000000];
-			rnd.nextBytes(data);
+    /**
+     * Uploads a byte array for the given job and verifies that a delete operation (via the {@link
+     * BlobServer}) does not fail even if the file is not deletable, e.g. via restricting the
+     * permissions.
+     *
+     * @param jobId job id
+     */
+    private void testDeleteBlobFails(@Nullable final JobID jobId, BlobKey.BlobType blobType)
+            throws IOException {
+        assumeThat(OperatingSystem.isWindows()).as("setWritable doesn't work on Windows").isFalse();
 
-			JobID jid = new JobID();
-			String name = "------------fdghljEgRJHF+##4U789Q345";
+        File blobFile = null;
+        File directory = null;
+        try (BlobServer server = TestingBlobUtils.createServer(tempDir)) {
+            server.start();
 
-			client.put(jid, name, data);
+            try {
+                byte[] data = new byte[2000000];
+                rnd.nextBytes(data);
 
-			File blobFile = server.getStorageLocation(jid, name);
-			assertTrue(blobFile.delete());
+                // put BLOB
+                BlobKey key = put(server, jobId, data, blobType);
+                assertThat(key).isNotNull();
 
-			// issue a DELETE request
-			try {
-				client.delete(jid, name);
-			}
-			catch (IOException e) {
-				fail("DELETE operation should not fail if file is already deleted");
-			}
-		}
-		catch (Exception e) {
-			e.printStackTrace();
-			fail(e.getMessage());
-		}
-		finally {
-			cleanup(server, client);
-		}
-	}
+                blobFile = server.getStorageLocation(jobId, key);
+                directory = blobFile.getParentFile();
 
-	@Test
-	public void testDeleteFails() {
-		assumeTrue(!OperatingSystem.isWindows()); //setWritable doesn't work on Windows.
+                assertThat(blobFile.setWritable(false, false)).isTrue();
+                assertThat(directory.setWritable(false, false)).isTrue();
 
-		BlobServer server = null;
-		BlobClient client = null;
-		BlobStore blobStore = new VoidBlobStore();
+                // issue a DELETE request
+                assertThat(delete(server, jobId, key, blobType)).isFalse();
 
-		try {
-			Configuration config = new Configuration();
-			server = new BlobServer(config, blobStore);
+                // the file should still be there
+                verifyContents(server, jobId, key, data);
+            } finally {
+                if (blobFile != null && directory != null) {
+                    //noinspection ResultOfMethodCallIgnored
+                    blobFile.setWritable(true, false);
+                    //noinspection ResultOfMethodCallIgnored
+                    directory.setWritable(true, false);
+                }
+            }
+        }
+    }
 
-			InetSocketAddress serverAddress = new InetSocketAddress("localhost", server.getPort());
-			client = new BlobClient(serverAddress, config);
+    @Test
+    void testJobCleanup() throws IOException {
+        testJobCleanup(TRANSIENT_BLOB);
+    }
 
-			byte[] data = new byte[2000000];
-			rnd.nextBytes(data);
+    @Test
+    void testJobCleanupHa() throws IOException {
+        testJobCleanup(PERMANENT_BLOB);
+    }
 
-			// put content addressable (like libraries)
-			BlobKey key = client.put(data);
-			assertNotNull(key);
+    /**
+     * Tests that {@link BlobServer} cleans up after calling {@link
+     * BlobServer#globalCleanupAsync(JobID, Executor)}.
+     *
+     * @param blobType whether the BLOB should become permanent or transient
+     */
+    private void testJobCleanup(BlobKey.BlobType blobType) throws IOException {
+        JobID jobId1 = new JobID();
+        JobID jobId2 = new JobID();
 
-			File blobFile = server.getStorageLocation(key);
-			File directory = blobFile.getParentFile();
+        final ExecutorService executorService = Executors.newSingleThreadExecutor();
+        try (BlobServer server = TestingBlobUtils.createServer(tempDir)) {
+            server.start();
 
-			assertTrue(blobFile.setWritable(false, false));
-			assertTrue(directory.setWritable(false, false));
+            final byte[] data = new byte[128];
+            byte[] data2 = Arrays.copyOf(data, data.length);
+            data2[0] ^= 1;
 
-			// issue a DELETE request
-			try {
-				client.delete(key);
-				fail("DELETE operation should fail if file cannot be deleted");
-			}
-			catch (IOException e) {
-				// expected
-			}
-			finally {
-				blobFile.setWritable(true, false);
-				directory.setWritable(true, false);
-			}
-		}
-		catch (Exception e) {
-			e.printStackTrace();
-			fail(e.getMessage());
-		}
-		finally {
-			cleanup(server, client);
-		}
-	}
+            BlobKey key1a = put(server, jobId1, data, blobType);
+            BlobKey key2 = put(server, jobId2, data, blobType);
+            assertThat(key1a.getHash()).isEqualTo(key2.getHash());
 
-	/**
-	 * FLINK-6020
-	 *
-	 * Tests that concurrent delete operations don't interfere with each other.
-	 *
-	 * Note: The test checks that there cannot be two threads which have checked whether a given blob file exist
-	 * and then one of them fails deleting it. Without the introduced lock, this situation should rarely happen
-	 * and make this test fail. Thus, if this test should become "unstable", then the delete atomicity is most likely
-	 * broken.
-	 */
-	@Test
-	public void testConcurrentDeleteOperations() throws IOException, ExecutionException, InterruptedException {
-		final Configuration configuration = new Configuration();
-		final BlobStore blobStore = mock(BlobStore.class);
+            BlobKey key1b = put(server, jobId1, data2, blobType);
 
-		final int concurrentDeleteOperations = 3;
-		final ExecutorService executor = Executors.newFixedThreadPool(concurrentDeleteOperations);
+            verifyContents(server, jobId1, key1a, data);
+            verifyContents(server, jobId1, key1b, data2);
+            checkFileCountForJob(2, jobId1, server);
 
-		final List<Future<Void>> deleteFutures = new ArrayList<>(concurrentDeleteOperations);
+            verifyContents(server, jobId2, key2, data);
+            checkFileCountForJob(1, jobId2, server);
 
-		final byte[] data = {1, 2, 3};
+            server.globalCleanupAsync(jobId1, executorService).join();
 
-		try (final BlobServer blobServer = new BlobServer(configuration, blobStore)) {
+            verifyDeleted(server, jobId1, key1a);
+            verifyDeleted(server, jobId1, key1b);
+            checkFileCountForJob(0, jobId1, server);
+            verifyContents(server, jobId2, key2, data);
+            checkFileCountForJob(1, jobId2, server);
 
-			final BlobKey blobKey;
+            server.globalCleanupAsync(jobId2, executorService).join();
 
-			try (BlobClient client = blobServer.createClient()) {
-				blobKey = client.put(data);
-			}
+            checkFileCountForJob(0, jobId1, server);
+            verifyDeleted(server, jobId2, key2);
+            checkFileCountForJob(0, jobId2, server);
 
-			assertTrue(blobServer.getStorageLocation(blobKey).exists());
+            // calling a second time should not fail
+            server.globalCleanupAsync(jobId2, executorService).join();
+        } finally {
+            assertThat(executorService.shutdownNow()).isEmpty();
+        }
+    }
 
-			for (int i = 0; i < concurrentDeleteOperations; i++) {
-				Future<Void> deleteFuture = FlinkCompletableFuture.supplyAsync(new Callable<Void>() {
-					@Override
-					public Void call() throws Exception {
-						try (BlobClient blobClient = blobServer.createClient()) {
-							blobClient.delete(blobKey);
-						}
+    @Test
+    void testApplicationCleanup() throws IOException {
+        ApplicationID applicationId1 = new ApplicationID();
+        ApplicationID applicationId2 = new ApplicationID();
+        BlobKey.BlobType blobType = PERMANENT_BLOB;
 
-						return null;
-					}
-				}, executor);
+        final ExecutorService executorService = Executors.newSingleThreadExecutor();
+        try (BlobServer server = TestingBlobUtils.createServer(tempDir)) {
+            server.start();
 
-				deleteFutures.add(deleteFuture);
-			}
+            final byte[] data = new byte[128];
+            byte[] data2 = Arrays.copyOf(data, data.length);
+            data2[0] ^= 1;
 
-			Future<Void> waitFuture = FutureUtils.waitForAll(deleteFutures);
+            BlobKey key1a = put(server, applicationId1, data, blobType);
+            BlobKey key2 = put(server, applicationId2, data, blobType);
+            assertThat(key1a.getHash()).isEqualTo(key2.getHash());
 
-			// make sure all delete operation have completed successfully
-			// in case of no lock, one of the delete operations should eventually fail
-			waitFuture.get();
+            BlobKey key1b = put(server, applicationId1, data2, blobType);
 
-			assertFalse(blobServer.getStorageLocation(blobKey).exists());
-		} finally {
-			executor.shutdownNow();
-		}
-	}
+            verifyContents(server, applicationId1, key1a, data);
+            verifyContents(server, applicationId1, key1b, data2);
+            checkFileCountForApplication(2, applicationId1, server);
 
-	private void cleanup(BlobServer server, BlobClient client) {
-		if (client != null) {
-			try {
-				client.close();
-			} catch (Throwable t) {
-				t.printStackTrace();
-			}
-		}
-		if (server != null) {
-			try {
-				server.close();
-			} catch (IOException e) {
-				e.printStackTrace();
-			}
-		}
-	}
+            verifyContents(server, applicationId2, key2, data);
+            checkFileCountForApplication(1, applicationId2, server);
+
+            server.globalCleanupAsync(applicationId1, executorService).join();
+
+            verifyDeleted(server, applicationId1, key1a);
+            verifyDeleted(server, applicationId1, key1b);
+            checkFileCountForApplication(0, applicationId1, server);
+            verifyContents(server, applicationId2, key2, data);
+            checkFileCountForApplication(1, applicationId2, server);
+
+            server.globalCleanupAsync(applicationId2, executorService).join();
+
+            checkFileCountForApplication(0, applicationId1, server);
+            verifyDeleted(server, applicationId2, key2);
+            checkFileCountForApplication(0, applicationId2, server);
+
+            // calling a second time should not fail
+            server.globalCleanupAsync(applicationId2, executorService).join();
+        } finally {
+            assertThat(executorService.shutdownNow()).isEmpty();
+        }
+    }
+
+    @Test
+    void testConcurrentDeleteOperationsNoJobTransient()
+            throws IOException, ExecutionException, InterruptedException {
+        testConcurrentDeleteOperations(null);
+    }
+
+    @Test
+    void testConcurrentDeleteOperationsForJobTransient()
+            throws IOException, ExecutionException, InterruptedException {
+        testConcurrentDeleteOperations(new JobID());
+    }
+
+    /**
+     * [FLINK-6020] Tests that concurrent delete operations don't interfere with each other.
+     *
+     * <p>Note: This test checks that there cannot be two threads which have checked whether a given
+     * blob file exist and then one of them fails deleting it. Without the introduced lock, this
+     * situation should rarely happen and make this test fail. Thus, if this test should become
+     * "unstable", then the delete atomicity is most likely broken.
+     *
+     * @param jobId job ID to use (or <tt>null</tt> if job-unrelated)
+     */
+    private void testConcurrentDeleteOperations(@Nullable final JobID jobId)
+            throws IOException, InterruptedException, ExecutionException {
+
+        final int concurrentDeleteOperations = 3;
+        final ExecutorService executor = Executors.newFixedThreadPool(concurrentDeleteOperations);
+
+        final List<CompletableFuture<Void>> deleteFutures =
+                new ArrayList<>(concurrentDeleteOperations);
+
+        final byte[] data = {1, 2, 3};
+
+        try (BlobServer server = TestingBlobUtils.createServer(tempDir)) {
+            server.start();
+
+            final TransientBlobKey blobKey =
+                    (TransientBlobKey) put(server, jobId, data, TRANSIENT_BLOB);
+
+            assertThat(server.getStorageLocation(jobId, blobKey)).exists();
+
+            for (int i = 0; i < concurrentDeleteOperations; i++) {
+                CompletableFuture<Void> deleteFuture =
+                        CompletableFuture.supplyAsync(
+                                () -> {
+                                    try {
+                                        assertThat(delete(server, jobId, blobKey)).isTrue();
+                                        assertThat(server.getStorageLocation(jobId, blobKey))
+                                                .doesNotExist();
+                                        return null;
+                                    } catch (IOException e) {
+                                        throw new CompletionException(
+                                                new FlinkException(
+                                                        "Could not delete the given blob key "
+                                                                + blobKey
+                                                                + '.'));
+                                    }
+                                },
+                                executor);
+
+                deleteFutures.add(deleteFuture);
+            }
+
+            CompletableFuture<Void> waitFuture = FutureUtils.waitForAll(deleteFutures);
+
+            // make sure all delete operation have completed successfully
+            // in case of no lock, one of the delete operations should eventually fail
+            waitFuture.get();
+
+            assertThat(server.getStorageLocation(jobId, blobKey)).doesNotExist();
+
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    /**
+     * Deletes a transient BLOB from the given BLOB service.
+     *
+     * @param service blob service
+     * @param jobId job ID (or <tt>null</tt> if job-unrelated)
+     * @param key blob key
+     * @return delete success
+     */
+    static boolean delete(BlobService service, @Nullable JobID jobId, TransientBlobKey key) {
+        if (jobId == null) {
+            return service.getTransientBlobService().deleteFromCache(key);
+        } else {
+            return service.getTransientBlobService().deleteFromCache(jobId, key);
+        }
+    }
+
+    private static boolean delete(
+            BlobServer blobServer, @Nullable JobID jobId, BlobKey key, BlobKey.BlobType blobType) {
+        Preconditions.checkNotNull(blobServer);
+        Preconditions.checkNotNull(key);
+
+        if (blobType == PERMANENT_BLOB) {
+            Preconditions.checkNotNull(jobId);
+
+            assertThat(key).isInstanceOf(PermanentBlobKey.class);
+            return blobServer.deletePermanent(jobId, (PermanentBlobKey) key);
+        } else {
+            assertThat(key).isInstanceOf(TransientBlobKey.class);
+            return delete(blobServer, jobId, (TransientBlobKey) key);
+        }
+    }
 }

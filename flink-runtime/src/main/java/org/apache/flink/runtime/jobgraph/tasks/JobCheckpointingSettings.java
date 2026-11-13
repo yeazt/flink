@@ -18,164 +18,126 @@
 
 package org.apache.flink.runtime.jobgraph.tasks;
 
+import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.runtime.checkpoint.MasterTriggerRestoreHook;
-import org.apache.flink.runtime.jobgraph.JobVertexID;
+import org.apache.flink.runtime.state.CheckpointStorage;
 import org.apache.flink.runtime.state.StateBackend;
 import org.apache.flink.util.SerializedValue;
+import org.apache.flink.util.TernaryBoolean;
 
 import javax.annotation.Nullable;
-import java.util.List;
 
-import static java.util.Objects.requireNonNull;
+import java.io.Serializable;
+
+import static org.apache.flink.util.Preconditions.checkNotNull;
 
 /**
- * The JobCheckpointingSettings are attached to a JobGraph and describe the settings
- * for the asynchronous checkpoints of the JobGraph, such as interval, and which vertices
- * need to participate.
+ * The JobCheckpointingSettings are attached to a JobGraph and describe the settings for the
+ * asynchronous checkpoints of the JobGraph, such as interval.
  */
-public class JobCheckpointingSettings implements java.io.Serializable {
+public class JobCheckpointingSettings implements Serializable {
 
-	private static final long serialVersionUID = -2593319571078198180L;
+    private static final long serialVersionUID = -2593319571078198180L;
 
-	private final List<JobVertexID> verticesToTrigger;
+    /** Contains configuration settings for the CheckpointCoordinator */
+    private final CheckpointCoordinatorConfiguration checkpointCoordinatorConfiguration;
 
-	private final List<JobVertexID> verticesToAcknowledge;
+    /** The default state backend, if configured by the user in the job */
+    @Nullable private final SerializedValue<StateBackend> defaultStateBackend;
 
-	private final List<JobVertexID> verticesToConfirm;
+    /** The enable flag for change log state backend, if configured by the user in the job */
+    private final TernaryBoolean changelogStateBackendEnabled;
 
-	private final long checkpointInterval;
+    /** The default checkpoint storage, if configured by the user in the job */
+    @Nullable private final SerializedValue<CheckpointStorage> defaultCheckpointStorage;
 
-	private final long checkpointTimeout;
+    /** (Factories for) hooks that are executed on the checkpoint coordinator */
+    @Nullable private final SerializedValue<MasterTriggerRestoreHook.Factory[]> masterHooks;
 
-	private final long minPauseBetweenCheckpoints;
+    private final TernaryBoolean stateBackendUseManagedMemory;
 
-	private final int maxConcurrentCheckpoints;
+    @VisibleForTesting
+    public JobCheckpointingSettings(
+            CheckpointCoordinatorConfiguration checkpointCoordinatorConfiguration,
+            @Nullable SerializedValue<StateBackend> defaultStateBackend) {
 
-	/** Settings for externalized checkpoints. */
-	private final ExternalizedCheckpointSettings externalizedCheckpointSettings;
+        this(
+                checkpointCoordinatorConfiguration,
+                defaultStateBackend,
+                null,
+                null,
+                null,
+                TernaryBoolean.UNDEFINED);
+    }
 
-	/** The default state backend, if configured by the user in the job */
-	@Nullable
-	private final StateBackend defaultStateBackend;
+    @VisibleForTesting
+    public JobCheckpointingSettings(
+            CheckpointCoordinatorConfiguration checkpointCoordinatorConfiguration,
+            @Nullable SerializedValue<StateBackend> defaultStateBackend,
+            @Nullable TernaryBoolean changelogStateBackendEnabled,
+            @Nullable SerializedValue<CheckpointStorage> defaultCheckpointStorage,
+            @Nullable SerializedValue<MasterTriggerRestoreHook.Factory[]> masterHooks) {
+        this(
+                checkpointCoordinatorConfiguration,
+                defaultStateBackend,
+                changelogStateBackendEnabled,
+                defaultCheckpointStorage,
+                masterHooks,
+                TernaryBoolean.UNDEFINED);
+    }
 
-	/** (Factories for) hooks that are executed on the checkpoint coordinator */
-	@Nullable
-	private final SerializedValue<MasterTriggerRestoreHook.Factory[]> masterHooks;
+    public JobCheckpointingSettings(
+            CheckpointCoordinatorConfiguration checkpointCoordinatorConfiguration,
+            @Nullable SerializedValue<StateBackend> defaultStateBackend,
+            @Nullable TernaryBoolean changelogStateBackendEnabled,
+            @Nullable SerializedValue<CheckpointStorage> defaultCheckpointStorage,
+            @Nullable SerializedValue<MasterTriggerRestoreHook.Factory[]> masterHooks,
+            TernaryBoolean stateBackendUseManagedMemory) {
 
-	/**
-	 * Flag indicating whether exactly once checkpoint mode has been configured.
-	 * If <code>false</code>, at least once mode has been configured. This is
-	 * not a necessary attribute, because the checkpointing mode is only relevant
-	 * for the stream tasks, but we expose it here to forward it to the web runtime
-	 * UI.
-	 */
-	private final boolean isExactlyOnce;
+        this.checkpointCoordinatorConfiguration = checkNotNull(checkpointCoordinatorConfiguration);
+        this.defaultStateBackend = defaultStateBackend;
+        this.changelogStateBackendEnabled =
+                changelogStateBackendEnabled == null
+                        ? TernaryBoolean.UNDEFINED
+                        : changelogStateBackendEnabled;
+        this.defaultCheckpointStorage = defaultCheckpointStorage;
+        this.masterHooks = masterHooks;
+        this.stateBackendUseManagedMemory = checkNotNull(stateBackendUseManagedMemory);
+    }
 
-	public JobCheckpointingSettings(
-			List<JobVertexID> verticesToTrigger,
-			List<JobVertexID> verticesToAcknowledge,
-			List<JobVertexID> verticesToConfirm,
-			long checkpointInterval,
-			long checkpointTimeout,
-			long minPauseBetweenCheckpoints,
-			int maxConcurrentCheckpoints,
-			ExternalizedCheckpointSettings externalizedCheckpointSettings,
-			@Nullable StateBackend defaultStateBackend,
-			boolean isExactlyOnce) {
+    // --------------------------------------------------------------------------------------------
 
-		this(verticesToTrigger, verticesToAcknowledge, verticesToConfirm,
-				checkpointInterval, checkpointTimeout, minPauseBetweenCheckpoints, maxConcurrentCheckpoints,
-				externalizedCheckpointSettings, defaultStateBackend, null, isExactlyOnce);
-	}
+    public CheckpointCoordinatorConfiguration getCheckpointCoordinatorConfiguration() {
+        return checkpointCoordinatorConfiguration;
+    }
 
-	public JobCheckpointingSettings(
-			List<JobVertexID> verticesToTrigger,
-			List<JobVertexID> verticesToAcknowledge,
-			List<JobVertexID> verticesToConfirm,
-			long checkpointInterval,
-			long checkpointTimeout,
-			long minPauseBetweenCheckpoints,
-			int maxConcurrentCheckpoints,
-			ExternalizedCheckpointSettings externalizedCheckpointSettings,
-			@Nullable StateBackend defaultStateBackend,
-			@Nullable SerializedValue<MasterTriggerRestoreHook.Factory[]> masterHooks,
-			boolean isExactlyOnce) {
+    @Nullable
+    public SerializedValue<StateBackend> getDefaultStateBackend() {
+        return defaultStateBackend;
+    }
 
-		// sanity checks
-		if (checkpointInterval < 1 || checkpointTimeout < 1 ||
-				minPauseBetweenCheckpoints < 0 || maxConcurrentCheckpoints < 1) {
-			throw new IllegalArgumentException();
-		}
+    public TernaryBoolean isChangelogStateBackendEnabled() {
+        return changelogStateBackendEnabled;
+    }
 
-		this.verticesToTrigger = requireNonNull(verticesToTrigger);
-		this.verticesToAcknowledge = requireNonNull(verticesToAcknowledge);
-		this.verticesToConfirm = requireNonNull(verticesToConfirm);
-		this.checkpointInterval = checkpointInterval;
-		this.checkpointTimeout = checkpointTimeout;
-		this.minPauseBetweenCheckpoints = minPauseBetweenCheckpoints;
-		this.maxConcurrentCheckpoints = maxConcurrentCheckpoints;
-		this.externalizedCheckpointSettings = requireNonNull(externalizedCheckpointSettings);
-		this.defaultStateBackend = defaultStateBackend;
-		this.isExactlyOnce = isExactlyOnce;
-		this.masterHooks = masterHooks;
-	}
+    public TernaryBoolean isStateBackendUseManagedMemory() {
+        return stateBackendUseManagedMemory;
+    }
 
-	// --------------------------------------------------------------------------------------------
+    @Nullable
+    public SerializedValue<CheckpointStorage> getDefaultCheckpointStorage() {
+        return defaultCheckpointStorage;
+    }
 
-	public List<JobVertexID> getVerticesToTrigger() {
-		return verticesToTrigger;
-	}
+    @Nullable
+    public SerializedValue<MasterTriggerRestoreHook.Factory[]> getMasterHooks() {
+        return masterHooks;
+    }
 
-	public List<JobVertexID> getVerticesToAcknowledge() {
-		return verticesToAcknowledge;
-	}
+    // --------------------------------------------------------------------------------------------
 
-	public List<JobVertexID> getVerticesToConfirm() {
-		return verticesToConfirm;
-	}
-
-	public long getCheckpointInterval() {
-		return checkpointInterval;
-	}
-
-	public long getCheckpointTimeout() {
-		return checkpointTimeout;
-	}
-
-	public long getMinPauseBetweenCheckpoints() {
-		return minPauseBetweenCheckpoints;
-	}
-
-	public int getMaxConcurrentCheckpoints() {
-		return maxConcurrentCheckpoints;
-	}
-
-	public ExternalizedCheckpointSettings getExternalizedCheckpointSettings() {
-		return externalizedCheckpointSettings;
-	}
-
-	@Nullable
-	public StateBackend getDefaultStateBackend() {
-		return defaultStateBackend;
-	}
-
-	@Nullable
-	public SerializedValue<MasterTriggerRestoreHook.Factory[]> getMasterHooks() {
-		return masterHooks;
-	}
-
-	public boolean isExactlyOnce() {
-		return isExactlyOnce;
-	}
-
-	// --------------------------------------------------------------------------------------------
-
-	@Override
-	public String toString() {
-		return String.format("SnapshotSettings: interval=%d, timeout=%d, pause-between=%d, " +
-						"maxConcurrent=%d, trigger=%s, ack=%s, commit=%s",
-						checkpointInterval, checkpointTimeout,
-						minPauseBetweenCheckpoints, maxConcurrentCheckpoints,
-						verticesToTrigger, verticesToAcknowledge, verticesToConfirm);
-	}
+    @Override
+    public String toString() {
+        return String.format("SnapshotSettings: config=%s", checkpointCoordinatorConfiguration);
+    }
 }

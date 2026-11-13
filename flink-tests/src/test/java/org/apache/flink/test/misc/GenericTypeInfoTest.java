@@ -19,55 +19,51 @@
 package org.apache.flink.test.misc;
 
 import org.apache.flink.api.common.typeinfo.TypeInformation;
-import org.apache.flink.api.java.Utils;
 import org.apache.flink.api.java.typeutils.TypeExtractor;
-import org.apache.flink.test.javaApiOperators.util.CollectionDataSets;
+import org.apache.flink.test.operators.util.CollectionDataStreams;
+import org.apache.flink.util.Utils;
 
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
-public class GenericTypeInfoTest {
+import static org.assertj.core.api.Assertions.assertThat;
 
-	@Test
-	public void testSerializerTree() {
-		@SuppressWarnings("unchecked")
-		TypeInformation<CollectionDataSets.PojoWithCollectionGeneric> ti = 
-				(TypeInformation<CollectionDataSets.PojoWithCollectionGeneric>) 
-						TypeExtractor.createTypeInfo(CollectionDataSets.PojoWithCollectionGeneric.class);
-		
-		String serTree = Utils.getSerializerTree(ti);
-		// We can not test against the entire output because the fields of 'String' differ
-		// between java versions
-		Assert.assertTrue(serTree.startsWith("GenericTypeInfo (PojoWithCollectionGeneric)\n" +
-				"    pojos:java.util.List\n" +
-				"    key:int\n" +
-				"    sqlDate:java.sql.Date\n" +
-				"    bigInt:java.math.BigInteger\n" +
-				"        signum:int\n" +
-				"        mag:[I\n" +
-				"        bitCount:int\n" +
-				"        bitLength:int\n" +
-				"        lowestSetBit:int\n" +
-				"        firstNonzeroIntNum:int\n" +
-				"    bigDecimalKeepItNull:java.math.BigDecimal\n" +
-				"        intVal:java.math.BigInteger\n" +
-				"            signum:int\n" +
-				"            mag:[I\n" +
-				"            bitCount:int\n" +
-				"            bitLength:int\n" +
-				"            lowestSetBit:int\n" +
-				"            firstNonzeroIntNum:int\n" +
-				"        scale:int\n" +
-				"    scalaBigInt:scala.math.BigInt\n" +
-				"        bigInteger:java.math.BigInteger\n" +
-				"            signum:int\n" +
-				"            mag:[I\n" +
-				"            bitCount:int\n" +
-				"            bitLength:int\n" +
-				"            lowestSetBit:int\n" +
-				"            firstNonzeroIntNum:int\n" +
-				"    mixed:java.util.List\n" +
-				"    makeMeGeneric:org.apache.flink.test.javaApiOperators.util.CollectionDataSets$PojoWithDateAndEnum\n" +
-				"        group:java.lang.String\n"));
-	}
+/** Test TypeInfo serializer tree. */
+class GenericTypeInfoTest {
+
+    @Test
+    void testSerializerTree() {
+        TypeInformation<CollectionDataStreams.PojoWithCollectionGeneric> ti =
+                (TypeInformation<CollectionDataStreams.PojoWithCollectionGeneric>)
+                        TypeExtractor.createTypeInfo(
+                                CollectionDataStreams.PojoWithCollectionGeneric.class);
+
+        final String serTree =
+                Utils.getSerializerTree(ti)
+                        // normalize String/BigInteger representations as they vary across java
+                        // versions
+                        // do 2 passes for BigInteger since they occur at different indentations
+                        .replaceAll("(java\\.lang\\.String\\R)( {12}\\S*\\R)+", "$1")
+                        .replaceAll(
+                                "( {4}[a-zA-Z]+:java\\.math\\.BigInteger\\R)( {8}\\S*\\R)+", "$1")
+                        .replaceAll(
+                                "( {8}[a-zA-Z]+:java\\.math\\.BigInteger\\R)( {12}\\S*\\R)+", "$1");
+
+        assertThat(serTree)
+                .isEqualTo(
+                        "GenericTypeInfo (PojoWithCollectionGeneric)\n"
+                                + "    pojos:java.util.List\n"
+                                + "    key:int\n"
+                                + "    sqlDate:java.sql.Date\n"
+                                + "    bigInt:java.math.BigInteger\n"
+                                + "    bigDecimalKeepItNull:java.math.BigDecimal\n"
+                                + "        intVal:java.math.BigInteger\n"
+                                + "        scale:int\n"
+                                + "    scalaBigInt:scala.math.BigInt\n"
+                                + "        bigInteger:java.math.BigInteger\n"
+                                + "    mixed:java.util.List\n"
+                                + "    makeMeGeneric:org.apache.flink.test.operators.util.CollectionDataStreams$PojoWithDateAndEnum\n"
+                                + "        group:java.lang.String\n"
+                                + "        date:java.util.Date\n"
+                                + "        cat:org.apache.flink.test.operators.util.CollectionDataStreams$Category (is enum)\n");
+    }
 }

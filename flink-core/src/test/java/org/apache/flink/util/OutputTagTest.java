@@ -15,30 +15,39 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.flink.util;
 
 import org.apache.flink.api.common.typeinfo.BasicTypeInfo;
-import org.junit.Test;
 
-public class OutputTagTest {
+import org.junit.jupiter.api.Test;
 
-	@Test(expected = NullPointerException.class)
-	public void testNullRejected() {
-		new OutputTag<Integer>(null);
-	}
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-	@Test(expected = NullPointerException.class)
-	public void testNullRejectedWithTypeInfo() {
-		new OutputTag<>(null, BasicTypeInfo.INT_TYPE_INFO);
-	}
+/** Tests for the {@link OutputTag}. */
+class OutputTagTest {
 
-	@Test(expected = IllegalArgumentException.class)
-	public void testEmptyStringRejected() {
-		new OutputTag<Integer>("");
-	}
+    @Test
+    void testNullRejected() {
+        assertThatThrownBy(() -> new OutputTag<Integer>(null))
+                .isInstanceOf(NullPointerException.class);
+    }
 
-	@Test(expected = IllegalArgumentException.class)
-	public void testEmptyStringRejectedWithTypeInfo() {
-		new OutputTag<>("", BasicTypeInfo.INT_TYPE_INFO);
-	}
+    @Test
+    void testNullRejectedWithTypeInfo() {
+        assertThatThrownBy(() -> new OutputTag<>(null, BasicTypeInfo.INT_TYPE_INFO))
+                .isInstanceOf(NullPointerException.class);
+    }
+
+    @Test
+    void testEmptyStringRejected() {
+        assertThatThrownBy(() -> new OutputTag<Integer>(""))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void testEmptyStringRejectedWithTypeInfo() {
+        assertThatThrownBy(() -> new OutputTag<>("", BasicTypeInfo.INT_TYPE_INFO))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
 }

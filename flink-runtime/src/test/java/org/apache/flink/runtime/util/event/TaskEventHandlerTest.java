@@ -16,83 +16,64 @@
  * limitations under the License.
  */
 
-
 package org.apache.flink.runtime.util.event;
-
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
 
 import org.apache.flink.runtime.event.TaskEvent;
 import org.apache.flink.runtime.event.task.IntegerTaskEvent;
 import org.apache.flink.runtime.event.task.StringTaskEvent;
 import org.apache.flink.runtime.io.network.api.TaskEventHandler;
-import org.junit.Test;
 
-/**
- * This class contains unit tests for the {@link TaskEventHandler}.
- * 
- */
-public class TaskEventHandlerTest {
-	/**
-	 * A test implementation of an {@link EventListener}.
-	 * 
-	 */
-	private static class TestEventListener implements EventListener<TaskEvent> {
+import org.junit.jupiter.api.Test;
 
-		/**
-		 * The event that was last received by this event listener.
-		 */
-		private TaskEvent receivedEvent = null;
+import static org.assertj.core.api.Assertions.assertThat;
 
-		/**
-		 * {@inheritDoc}
-		 * @param event
-		 */
-		@Override
-		public void onEvent(TaskEvent event) {
+/** This class contains unit tests for the {@link TaskEventHandler}. */
+class TaskEventHandlerTest {
+    /** A test implementation of an {@link EventListener}. */
+    private static class TestEventListener implements EventListener<TaskEvent> {
 
-			this.receivedEvent = event;
-		}
+        /** The event that was last received by this event listener. */
+        private TaskEvent receivedEvent = null;
 
-		/**
-		 * Returns the event which was last received by this event listener. If no event
-		 * has been received so far the return value is <code>null</code>.
-		 * 
-		 * @return the event which was last received, possibly <code>null</code>
-		 */
-		public TaskEvent getLastReceivedEvent() {
+        /**
+         * {@inheritDoc}
+         *
+         * @param event
+         */
+        @Override
+        public void onEvent(TaskEvent event) {
 
-			return this.receivedEvent;
-		}
-	}
+            this.receivedEvent = event;
+        }
 
-	/**
-	 * Tests the publish/subscribe mechanisms implemented in the {@link TaskEventHandler}.
-	 */
-	@Test
-	public void testEventNotificationManager() {
+        /**
+         * Returns the event which was last received by this event listener. If no event has been
+         * received so far the return value is <code>null</code>.
+         *
+         * @return the event which was last received, possibly <code>null</code>
+         */
+        public TaskEvent getLastReceivedEvent() {
 
-		final TaskEventHandler evm = new TaskEventHandler();
-		final TestEventListener listener = new TestEventListener();
+            return this.receivedEvent;
+        }
+    }
 
-		evm.subscribe(listener, StringTaskEvent.class);
+    /** Tests the publish/subscribe mechanisms implemented in the {@link TaskEventHandler}. */
+    @Test
+    void testEventNotificationManager() {
 
-		final StringTaskEvent stringTaskEvent1 = new StringTaskEvent("Test 1");
-		final StringTaskEvent stringTaskEvent2 = new StringTaskEvent("Test 2");
+        final TaskEventHandler evm = new TaskEventHandler();
+        final TestEventListener listener = new TestEventListener();
 
-		evm.publish(stringTaskEvent1);
-		evm.publish(new IntegerTaskEvent(5));
+        evm.subscribe(listener, StringTaskEvent.class);
 
-		assertNotNull(listener.getLastReceivedEvent());
-		StringTaskEvent receivedStringEvent = (StringTaskEvent) listener.getLastReceivedEvent();
-		assertEquals(stringTaskEvent1, receivedStringEvent);
+        final StringTaskEvent stringTaskEvent1 = new StringTaskEvent("Test 1");
 
-		evm.unsubscribe(listener, StringTaskEvent.class);
+        evm.publish(stringTaskEvent1);
+        evm.publish(new IntegerTaskEvent(5));
 
-		evm.publish(stringTaskEvent2);
-
-		assertNotNull(listener.getLastReceivedEvent());
-		receivedStringEvent = (StringTaskEvent) listener.getLastReceivedEvent();
-		assertEquals(stringTaskEvent1, receivedStringEvent);
-	}
+        assertThat(listener.getLastReceivedEvent()).isNotNull();
+        StringTaskEvent receivedStringEvent = (StringTaskEvent) listener.getLastReceivedEvent();
+        assertThat(stringTaskEvent1).isEqualTo(receivedStringEvent);
+    }
 }

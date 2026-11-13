@@ -18,218 +18,238 @@
 
 package org.apache.flink.runtime.taskexecutor;
 
-import org.apache.flink.api.common.time.Time;
-import org.apache.flink.configuration.AkkaOptions;
-import org.apache.flink.configuration.ConfigConstants;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.ConfigurationUtils;
+import org.apache.flink.configuration.RpcOptions;
 import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.configuration.UnmodifiableConfiguration;
-import org.apache.flink.runtime.akka.AkkaUtils;
+import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
+import org.apache.flink.runtime.registration.RetryingRegistrationConfiguration;
 import org.apache.flink.runtime.taskmanager.TaskManagerRuntimeInfo;
 import org.apache.flink.util.Preconditions;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import scala.concurrent.duration.Duration;
+import javax.annotation.Nullable;
 
 import java.io.File;
+import java.time.Duration;
 
-/**
- * Configuration object for {@link TaskExecutor}.
- */
+/** Configuration object for {@link TaskExecutor}. */
 public class TaskManagerConfiguration implements TaskManagerRuntimeInfo {
 
-	private static final Logger LOG = LoggerFactory.getLogger(TaskManagerConfiguration.class);
+    private static final Logger LOG = LoggerFactory.getLogger(TaskManagerConfiguration.class);
 
-	private final int numberSlots;
+    private final int numberSlots;
 
-	private final String[] tmpDirectories;
+    private final ResourceProfile defaultSlotResourceProfile;
 
-	private final Time timeout;
-	// null indicates an infinite duration
-	private final Time maxRegistrationDuration;
-	private final Time initialRegistrationPause;
-	private final Time maxRegistrationPause;
-	private final Time refusedRegistrationPause;
+    private final ResourceProfile totalResourceProfile;
 
-	private final long cleanupInterval;
+    private final String[] tmpDirectories;
 
-	private final UnmodifiableConfiguration configuration;
+    private final Duration rpcTimeout;
 
-	private final boolean exitJvmOnOutOfMemory;
+    private final Duration slotTimeout;
 
-	public TaskManagerConfiguration(
-		int numberSlots,
-		String[] tmpDirectories,
-		Time timeout,
-		Time maxRegistrationDuration,
-		Time initialRegistrationPause,
-		Time maxRegistrationPause,
-		Time refusedRegistrationPause,
-		long cleanupInterval,
-		Configuration configuration,
-		boolean exitJvmOnOutOfMemory) {
+    // null indicates an infinite duration
+    @Nullable private final Duration maxRegistrationDuration;
 
-		this.numberSlots = numberSlots;
-		this.tmpDirectories = Preconditions.checkNotNull(tmpDirectories);
-		this.timeout = Preconditions.checkNotNull(timeout);
-		this.maxRegistrationDuration = maxRegistrationDuration;
-		this.initialRegistrationPause = Preconditions.checkNotNull(initialRegistrationPause);
-		this.maxRegistrationPause = Preconditions.checkNotNull(maxRegistrationPause);
-		this.refusedRegistrationPause = Preconditions.checkNotNull(refusedRegistrationPause);
-		this.cleanupInterval = Preconditions.checkNotNull(cleanupInterval);
-		this.configuration = new UnmodifiableConfiguration(Preconditions.checkNotNull(configuration));
-		this.exitJvmOnOutOfMemory = exitJvmOnOutOfMemory;
-	}
+    private final UnmodifiableConfiguration configuration;
 
-	public int getNumberSlots() {
-		return numberSlots;
-	}
+    private final boolean exitJvmOnOutOfMemory;
 
-	public Time getTimeout() {
-		return timeout;
-	}
+    @Nullable private final String taskManagerLogPath;
 
-	public Time getMaxRegistrationDuration() {
-		return maxRegistrationDuration;
-	}
+    @Nullable private final String taskManagerStdoutPath;
 
-	public Time getInitialRegistrationPause() {
-		return initialRegistrationPause;
-	}
+    @Nullable private final String taskManagerLogDir;
 
-	public Time getMaxRegistrationPause() {
-		return maxRegistrationPause;
-	}
+    private final String taskManagerExternalAddress;
 
-	public Time getRefusedRegistrationPause() {
-		return refusedRegistrationPause;
-	}
+    private final File tmpWorkingDirectory;
 
-	public long getCleanupInterval() {
-		return cleanupInterval;
-	}
+    private final RetryingRegistrationConfiguration retryingRegistrationConfiguration;
 
-	@Override
-	public Configuration getConfiguration() {
-		return configuration;
-	}
+    public TaskManagerConfiguration(
+            int numberSlots,
+            ResourceProfile defaultSlotResourceProfile,
+            ResourceProfile totalResourceProfile,
+            String[] tmpDirectories,
+            Duration rpcTimeout,
+            Duration slotTimeout,
+            @Nullable Duration maxRegistrationDuration,
+            Configuration configuration,
+            boolean exitJvmOnOutOfMemory,
+            @Nullable String taskManagerLogPath,
+            @Nullable String taskManagerStdoutPath,
+            @Nullable String taskManagerLogDir,
+            String taskManagerExternalAddress,
+            File tmpWorkingDirectory,
+            RetryingRegistrationConfiguration retryingRegistrationConfiguration) {
 
-	@Override
-	public String[] getTmpDirectories() {
-		return tmpDirectories;
-	}
+        this.numberSlots = numberSlots;
+        this.defaultSlotResourceProfile = defaultSlotResourceProfile;
+        this.totalResourceProfile = totalResourceProfile;
+        this.tmpDirectories = Preconditions.checkNotNull(tmpDirectories);
+        this.rpcTimeout = Preconditions.checkNotNull(rpcTimeout);
+        this.slotTimeout = Preconditions.checkNotNull(slotTimeout);
+        this.maxRegistrationDuration = maxRegistrationDuration;
+        this.configuration =
+                new UnmodifiableConfiguration(Preconditions.checkNotNull(configuration));
+        this.exitJvmOnOutOfMemory = exitJvmOnOutOfMemory;
+        this.taskManagerLogPath = taskManagerLogPath;
+        this.taskManagerStdoutPath = taskManagerStdoutPath;
+        this.taskManagerLogDir = taskManagerLogDir;
+        this.taskManagerExternalAddress = taskManagerExternalAddress;
+        this.tmpWorkingDirectory = tmpWorkingDirectory;
+        this.retryingRegistrationConfiguration = retryingRegistrationConfiguration;
+    }
 
-	@Override
-	public boolean shouldExitJvmOnOutOfMemoryError() {
-		return exitJvmOnOutOfMemory;
-	}
+    public int getNumberSlots() {
+        return numberSlots;
+    }
 
-	// --------------------------------------------------------------------------------------------
-	//  Static factory methods
-	// --------------------------------------------------------------------------------------------
+    public ResourceProfile getDefaultSlotResourceProfile() {
+        return defaultSlotResourceProfile;
+    }
 
-	public static TaskManagerConfiguration fromConfiguration(Configuration configuration) {
-		int numberSlots = configuration.getInteger(ConfigConstants.TASK_MANAGER_NUM_TASK_SLOTS, 1);
+    public ResourceProfile getTotalResourceProfile() {
+        return totalResourceProfile;
+    }
 
-		if (numberSlots == -1) {
-			numberSlots = 1;
-		}
+    public Duration getRpcTimeout() {
+        return rpcTimeout;
+    }
 
-		final String[] tmpDirPaths = configuration.getString(
-			ConfigConstants.TASK_MANAGER_TMP_DIR_KEY,
-			ConfigConstants.DEFAULT_TASK_MANAGER_TMP_PATH).split(",|" + File.pathSeparator);
+    public Duration getSlotTimeout() {
+        return slotTimeout;
+    }
 
-		final Time timeout;
+    @Nullable
+    public Duration getMaxRegistrationDuration() {
+        return maxRegistrationDuration;
+    }
 
-		try {
-			timeout = Time.milliseconds(AkkaUtils.getTimeout(configuration).toMillis());
-		} catch (Exception e) {
-			throw new IllegalArgumentException(
-				"Invalid format for '" + AkkaOptions.ASK_TIMEOUT.key() +
-					"'.Use formats like '50 s' or '1 min' to specify the timeout.");
-		}
+    @Override
+    public Configuration getConfiguration() {
+        return configuration;
+    }
 
-		LOG.info("Messages have a max timeout of " + timeout);
+    @Override
+    public String[] getTmpDirectories() {
+        return tmpDirectories;
+    }
 
-		final long cleanupInterval = configuration.getLong(
-			ConfigConstants.LIBRARY_CACHE_MANAGER_CLEANUP_INTERVAL,
-			ConfigConstants.DEFAULT_LIBRARY_CACHE_MANAGER_CLEANUP_INTERVAL) * 1000;
+    @Override
+    public boolean shouldExitJvmOnOutOfMemoryError() {
+        return exitJvmOnOutOfMemory;
+    }
 
-		final Time finiteRegistrationDuration;
+    @Nullable
+    public String getTaskManagerLogPath() {
+        return taskManagerLogPath;
+    }
 
-		try {
-			Duration maxRegistrationDuration = Duration.create(configuration.getString(
-				ConfigConstants.TASK_MANAGER_MAX_REGISTRATION_DURATION,
-				ConfigConstants.DEFAULT_TASK_MANAGER_MAX_REGISTRATION_DURATION));
-			if (maxRegistrationDuration.isFinite()) {
-				finiteRegistrationDuration = Time.milliseconds(maxRegistrationDuration.toMillis());
-			} else {
-				finiteRegistrationDuration = null;
-			}
-		} catch (NumberFormatException e) {
-			throw new IllegalArgumentException("Invalid format for parameter " +
-				ConfigConstants.TASK_MANAGER_MAX_REGISTRATION_DURATION, e);
-		}
+    @Nullable
+    public String getTaskManagerStdoutPath() {
+        return taskManagerStdoutPath;
+    }
 
-		final Time initialRegistrationPause;
-		try {
-			Duration pause = Duration.create(configuration.getString(
-				ConfigConstants.TASK_MANAGER_INITIAL_REGISTRATION_PAUSE,
-				ConfigConstants.DEFAULT_TASK_MANAGER_INITIAL_REGISTRATION_PAUSE));
-			if (pause.isFinite()) {
-				initialRegistrationPause = Time.milliseconds(pause.toMillis());
-			} else {
-				throw new IllegalArgumentException("The initial registration pause must be finite: " + pause);
-			}
-		} catch (NumberFormatException e) {
-			throw new IllegalArgumentException("Invalid format for parameter " +
-				ConfigConstants.TASK_MANAGER_INITIAL_REGISTRATION_PAUSE, e);
-		}
+    @Nullable
+    public String getTaskManagerLogDir() {
+        return taskManagerLogDir;
+    }
 
-		final Time maxRegistrationPause;
-		try {
-			Duration pause = Duration.create(configuration.getString(
-				ConfigConstants.TASK_MANAGER_MAX_REGISTARTION_PAUSE,
-				ConfigConstants.DEFAULT_TASK_MANAGER_MAX_REGISTRATION_PAUSE));
-			if (pause.isFinite()) {
-				maxRegistrationPause = Time.milliseconds(pause.toMillis());
-			} else {
-				throw new IllegalArgumentException("The maximum registration pause must be finite: " + pause);
-			}
-		} catch (NumberFormatException e) {
-			throw new IllegalArgumentException("Invalid format for parameter " +
-				ConfigConstants.TASK_MANAGER_INITIAL_REGISTRATION_PAUSE, e);
-		}
+    @Override
+    public String getTaskManagerExternalAddress() {
+        return taskManagerExternalAddress;
+    }
 
-		final Time refusedRegistrationPause;
-		try {
-			Duration pause = Duration.create(configuration.getString(
-				ConfigConstants.TASK_MANAGER_REFUSED_REGISTRATION_PAUSE,
-				ConfigConstants.DEFAULT_TASK_MANAGER_REFUSED_REGISTRATION_PAUSE));
-			if (pause.isFinite()) {
-				refusedRegistrationPause = Time.milliseconds(pause.toMillis());
-			} else {
-				throw new IllegalArgumentException("The refused registration pause must be finite: " + pause);
-			}
-		} catch (NumberFormatException e) {
-			throw new IllegalArgumentException("Invalid format for parameter " +
-				ConfigConstants.TASK_MANAGER_INITIAL_REGISTRATION_PAUSE, e);
-		}
+    @Override
+    public File getTmpWorkingDirectory() {
+        return tmpWorkingDirectory;
+    }
 
-		final boolean exitOnOom = configuration.getBoolean(TaskManagerOptions.KILL_ON_OUT_OF_MEMORY);
+    public RetryingRegistrationConfiguration getRetryingRegistrationConfiguration() {
+        return retryingRegistrationConfiguration;
+    }
 
-		return new TaskManagerConfiguration(
-			numberSlots,
-			tmpDirPaths,
-			timeout,
-			finiteRegistrationDuration,
-			initialRegistrationPause,
-			maxRegistrationPause,
-			refusedRegistrationPause,
-			cleanupInterval,
-			configuration,
-			exitOnOom);
-	}
+    // --------------------------------------------------------------------------------------------
+    //  Static factory methods
+    // --------------------------------------------------------------------------------------------
+
+    public static TaskManagerConfiguration fromConfiguration(
+            Configuration configuration,
+            TaskExecutorResourceSpec taskExecutorResourceSpec,
+            String externalAddress,
+            File tmpWorkingDirectory) {
+        int numberSlots = configuration.get(TaskManagerOptions.NUM_TASK_SLOTS, 1);
+
+        if (numberSlots == -1) {
+            numberSlots = 1;
+        }
+
+        final String[] tmpDirPaths = ConfigurationUtils.parseTempDirectories(configuration);
+
+        final Duration rpcTimeout = configuration.get(RpcOptions.ASK_TIMEOUT_DURATION);
+
+        LOG.debug("Messages have a max timeout of " + rpcTimeout);
+
+        final Duration slotTimeout = configuration.get(TaskManagerOptions.SLOT_TIMEOUT);
+
+        Duration finiteRegistrationDuration;
+        try {
+            finiteRegistrationDuration = configuration.get(TaskManagerOptions.REGISTRATION_TIMEOUT);
+        } catch (IllegalArgumentException e) {
+            LOG.warn(
+                    "Invalid format for parameter {}. Set the timeout to be infinite.",
+                    TaskManagerOptions.REGISTRATION_TIMEOUT.key());
+            finiteRegistrationDuration = null;
+        }
+
+        final boolean exitOnOom = configuration.get(TaskManagerOptions.KILL_ON_OUT_OF_MEMORY);
+
+        final String taskManagerLogPath =
+                configuration.get(TaskManagerOptions.TASK_MANAGER_LOG_PATH);
+        final String taskManagerStdoutPath;
+        final String taskManagerLogDir;
+
+        if (taskManagerLogPath != null) {
+            final int extension = taskManagerLogPath.lastIndexOf('.');
+            taskManagerLogDir = new File(taskManagerLogPath).getParent();
+
+            if (extension > 0) {
+                taskManagerStdoutPath = taskManagerLogPath.substring(0, extension) + ".out";
+            } else {
+                taskManagerStdoutPath = null;
+            }
+        } else {
+            taskManagerStdoutPath = null;
+            taskManagerLogDir = null;
+        }
+
+        final RetryingRegistrationConfiguration retryingRegistrationConfiguration =
+                RetryingRegistrationConfiguration.fromConfiguration(configuration);
+
+        return new TaskManagerConfiguration(
+                numberSlots,
+                TaskExecutorResourceUtils.generateDefaultSlotResourceProfile(
+                        taskExecutorResourceSpec, numberSlots),
+                TaskExecutorResourceUtils.generateTotalAvailableResourceProfile(
+                        taskExecutorResourceSpec),
+                tmpDirPaths,
+                rpcTimeout,
+                slotTimeout,
+                finiteRegistrationDuration,
+                configuration,
+                exitOnOom,
+                taskManagerLogPath,
+                taskManagerStdoutPath,
+                taskManagerLogDir,
+                externalAddress,
+                tmpWorkingDirectory,
+                retryingRegistrationConfiguration);
+    }
 }

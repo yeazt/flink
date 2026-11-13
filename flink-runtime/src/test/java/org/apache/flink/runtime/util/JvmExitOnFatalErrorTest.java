@@ -24,236 +24,271 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.core.io.InputSplit;
 import org.apache.flink.core.testutils.CommonTestUtils;
-import org.apache.flink.runtime.blob.BlobKey;
+import org.apache.flink.runtime.blob.VoidPermanentBlobService;
 import org.apache.flink.runtime.broadcast.BroadcastVariableManager;
-import org.apache.flink.runtime.checkpoint.CheckpointMetrics;
-import org.apache.flink.runtime.checkpoint.SubtaskState;
+import org.apache.flink.runtime.checkpoint.channel.ChannelStateWriteRequestExecutorFactory;
 import org.apache.flink.runtime.clusterframework.types.AllocationID;
-import org.apache.flink.runtime.concurrent.Future;
 import org.apache.flink.runtime.deployment.InputGateDeploymentDescriptor;
 import org.apache.flink.runtime.deployment.ResultPartitionDeploymentDescriptor;
-import org.apache.flink.runtime.execution.ExecutionState;
-import org.apache.flink.runtime.execution.librarycache.FallbackLibraryCacheManager;
+import org.apache.flink.runtime.execution.Environment;
+import org.apache.flink.runtime.execution.librarycache.TestingClassLoaderLease;
 import org.apache.flink.runtime.executiongraph.ExecutionAttemptID;
 import org.apache.flink.runtime.executiongraph.JobInformation;
 import org.apache.flink.runtime.executiongraph.TaskInformation;
+import org.apache.flink.runtime.externalresource.ExternalResourceInfoProvider;
 import org.apache.flink.runtime.filecache.FileCache;
 import org.apache.flink.runtime.io.disk.iomanager.IOManager;
 import org.apache.flink.runtime.io.disk.iomanager.IOManagerAsync;
-import org.apache.flink.runtime.io.network.NetworkEnvironment;
-import org.apache.flink.runtime.io.network.netty.PartitionProducerStateChecker;
-import org.apache.flink.runtime.io.network.partition.ResultPartitionConsumableNotifier;
-import org.apache.flink.runtime.io.network.partition.ResultPartitionID;
-import org.apache.flink.runtime.jobgraph.IntermediateDataSetID;
+import org.apache.flink.runtime.io.network.NettyShuffleEnvironmentBuilder;
+import org.apache.flink.runtime.io.network.TaskEventDispatcher;
+import org.apache.flink.runtime.jobgraph.JobType;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobgraph.tasks.AbstractInvokable;
 import org.apache.flink.runtime.jobgraph.tasks.InputSplitProvider;
 import org.apache.flink.runtime.memory.MemoryManager;
-import org.apache.flink.runtime.operators.testutils.UnregisteredTaskMetricsGroup;
-import org.apache.flink.runtime.query.TaskKvStateRegistry;
+import org.apache.flink.runtime.memory.MemoryManagerBuilder;
+import org.apache.flink.runtime.memory.SharedResources;
+import org.apache.flink.runtime.metrics.groups.UnregisteredMetricGroups;
+import org.apache.flink.runtime.query.KvStateRegistry;
+import org.apache.flink.runtime.shuffle.ShuffleEnvironment;
+import org.apache.flink.runtime.state.TaskExecutorStateChangelogStoragesManager;
+import org.apache.flink.runtime.state.TaskLocalStateStore;
+import org.apache.flink.runtime.state.TaskLocalStateStoreImpl;
+import org.apache.flink.runtime.state.TaskStateManager;
+import org.apache.flink.runtime.state.TaskStateManagerImpl;
+import org.apache.flink.runtime.state.TestLocalRecoveryConfig;
+import org.apache.flink.runtime.state.changelog.StateChangelogStorage;
+import org.apache.flink.runtime.state.changelog.inmemory.InMemoryStateChangelogStorage;
+import org.apache.flink.runtime.taskexecutor.KvStateService;
+import org.apache.flink.runtime.taskexecutor.NoOpPartitionProducerStateChecker;
+import org.apache.flink.runtime.taskexecutor.TaskExecutorResourceUtils;
 import org.apache.flink.runtime.taskexecutor.TaskManagerConfiguration;
-import org.apache.flink.runtime.taskmanager.CheckpointResponder;
+import org.apache.flink.runtime.taskexecutor.TestGlobalAggregateManager;
+import org.apache.flink.runtime.taskmanager.NoOpCheckpointResponder;
+import org.apache.flink.runtime.taskmanager.NoOpTaskManagerActions;
+import org.apache.flink.runtime.taskmanager.NoOpTaskOperatorEventGateway;
 import org.apache.flink.runtime.taskmanager.Task;
-import org.apache.flink.runtime.taskmanager.TaskActions;
-import org.apache.flink.runtime.taskmanager.TaskExecutionState;
-import org.apache.flink.runtime.taskmanager.TaskManagerActions;
 import org.apache.flink.runtime.taskmanager.TaskManagerRuntimeInfo;
 import org.apache.flink.runtime.testutils.TestJvmProcess;
+import org.apache.flink.testutils.junit.utils.TempDirUtils;
 import org.apache.flink.util.OperatingSystem;
 import org.apache.flink.util.SerializedValue;
 
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
-import java.net.URL;
+import java.io.File;
+import java.net.InetAddress;
 import java.util.Collections;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 
-import static org.junit.Assume.assumeTrue;
-import static org.mockito.Mockito.*;
+import static org.apache.flink.runtime.executiongraph.ExecutionGraphTestUtils.createExecutionAttemptId;
+import static org.assertj.core.api.Assumptions.assumeThat;
 
 /**
- * Test that verifies the behavior of blocking shutdown hooks and of the
- * {@link JvmShutdownSafeguard} that guards against it.
+ * Test that verifies the behavior of blocking shutdown hooks and of the {@link
+ * JvmShutdownSafeguard} that guards against it.
  */
-public class JvmExitOnFatalErrorTest {
+class JvmExitOnFatalErrorTest {
 
-	@Test
-	public void testExitJvmOnOutOfMemory() throws Exception {
-		// this test works only on linux
-		assumeTrue(OperatingSystem.isLinux());
+    @TempDir private java.nio.file.Path tempDir;
 
-		// this test leaves remaining processes if not executed with Java 8
-		CommonTestUtils.assumeJava8();
+    @Test
+    void testExitJvmOnOutOfMemory() throws Exception {
+        // this test works only on linux and MacOS
+        assumeThat(OperatingSystem.isWindows()).isFalse();
 
-		// to check what went wrong (when the test hangs) uncomment this line 
-//		ProcessEntryPoint.main(new String[0]);
+        // to check what went wrong (when the test hangs) uncomment this line
+        //        ProcessEntryPoint.main(new
+        // String[]{TempDirUtils.newFolder(tempDir).getAbsolutePath()});
 
-		final KillOnFatalErrorProcess testProcess = new KillOnFatalErrorProcess();
+        final KillOnFatalErrorProcess testProcess =
+                new KillOnFatalErrorProcess(TempDirUtils.newFolder(tempDir));
 
-		try {
-			testProcess.startProcess();
-			testProcess.waitFor();
-		}
-		finally {
-			testProcess.destroy();
-		}
-	}
+        try {
+            testProcess.startProcess();
+            testProcess.waitFor();
+        } finally {
+            testProcess.destroy();
+        }
+    }
 
-	// ------------------------------------------------------------------------
-	//  Blocking Process Implementation
-	// ------------------------------------------------------------------------
+    // ------------------------------------------------------------------------
+    //  Blocking Process Implementation
+    // ------------------------------------------------------------------------
 
-	private static final class KillOnFatalErrorProcess extends TestJvmProcess {
+    private static final class KillOnFatalErrorProcess extends TestJvmProcess {
 
-		public KillOnFatalErrorProcess() throws Exception {}
+        private final File temporaryFolder;
 
-		@Override
-		public String getName() {
-			return "KillOnFatalErrorProcess";
-		}
+        public KillOnFatalErrorProcess(File temporaryFolder) throws Exception {
+            this.temporaryFolder = temporaryFolder;
+        }
 
-		@Override
-		public String[] getJvmArgs() {
-			return new String[0];
-		}
+        @Override
+        public String getName() {
+            return "KillOnFatalErrorProcess";
+        }
 
-		@Override
-		public String getEntryPointClassName() {
-			return ProcessEntryPoint.class.getName();
-		}
-	} 
+        @Override
+        public String[] getMainMethodArgs() {
+            return new String[] {temporaryFolder.getAbsolutePath()};
+        }
 
-	// ------------------------------------------------------------------------
+        @Override
+        public String getEntryPointClassName() {
+            return ProcessEntryPoint.class.getName();
+        }
+    }
 
-	public static final class ProcessEntryPoint {
+    // ------------------------------------------------------------------------
 
-		public static void main(String[] args) throws Exception {
+    public static final class ProcessEntryPoint {
 
-			System.err.println("creating task");
+        public static void main(String[] args) throws Exception {
 
-			// we suppress process exits via errors here to not
-			// have a test that exits accidentally due to a programming error 
-			try {
-				final Configuration taskManagerConfig = new Configuration();
-				taskManagerConfig.setBoolean(TaskManagerOptions.KILL_ON_OUT_OF_MEMORY, true);
+            System.err.println("creating task");
 
-				final JobID jid = new JobID();
-				final JobVertexID jobVertexId = new JobVertexID();
-				final ExecutionAttemptID executionAttemptID = new ExecutionAttemptID();
-				final AllocationID slotAllocationId = new AllocationID();
+            // we suppress process exits via errors here to not
+            // have a test that exits accidentally due to a programming error
+            try {
+                final Configuration taskManagerConfig = new Configuration();
+                taskManagerConfig.set(TaskManagerOptions.KILL_ON_OUT_OF_MEMORY, true);
 
-				final SerializedValue<ExecutionConfig> execConfig = new SerializedValue<>(new ExecutionConfig());
+                final JobID jid = new JobID();
+                final AllocationID allocationID = new AllocationID();
+                final JobVertexID jobVertexId = new JobVertexID();
+                final ExecutionAttemptID executionAttemptID = createExecutionAttemptId(jobVertexId);
+                final AllocationID slotAllocationId = new AllocationID();
 
-				final JobInformation jobInformation = new JobInformation(
-						jid, "Test Job", execConfig, new Configuration(),
-						Collections.<BlobKey>emptyList(), Collections.<URL>emptyList());
+                final SerializedValue<ExecutionConfig> execConfig =
+                        new SerializedValue<>(new ExecutionConfig());
 
-				final TaskInformation taskInformation = new TaskInformation(
-						jobVertexId, "Test Task", 1, 1, OomInvokable.class.getName(), new Configuration());
+                final JobInformation jobInformation =
+                        new JobInformation(
+                                jid,
+                                JobType.STREAMING,
+                                "Test Job",
+                                execConfig,
+                                new Configuration(),
+                                Collections.emptyList(),
+                                Collections.emptyList());
 
-				final MemoryManager memoryManager = new MemoryManager(1024 * 1024, 1);
-				final IOManager ioManager = new IOManagerAsync();
+                final TaskInformation taskInformation =
+                        new TaskInformation(
+                                jobVertexId,
+                                "Test Task",
+                                1,
+                                1,
+                                OomInvokable.class.getName(),
+                                new Configuration());
 
-				final NetworkEnvironment networkEnvironment = mock(NetworkEnvironment.class);
-				when(networkEnvironment.createKvStateTaskRegistry(jid, jobVertexId)).thenReturn(mock(TaskKvStateRegistry.class));
+                final MemoryManager memoryManager =
+                        MemoryManagerBuilder.newBuilder().setMemorySize(1024 * 1024).build();
+                final IOManager ioManager = new IOManagerAsync();
 
-				final TaskManagerRuntimeInfo tmInfo = TaskManagerConfiguration.fromConfiguration(taskManagerConfig);
+                final ShuffleEnvironment<?, ?> shuffleEnvironment =
+                        new NettyShuffleEnvironmentBuilder().build();
 
-				final Executor executor = Executors.newCachedThreadPool();
+                final Configuration copiedConf = new Configuration(taskManagerConfig);
+                final File tmpWorkingDirectory = new File(args[0]);
+                final TaskManagerRuntimeInfo tmInfo =
+                        TaskManagerConfiguration.fromConfiguration(
+                                taskManagerConfig,
+                                TaskExecutorResourceUtils.resourceSpecFromConfigForLocalExecution(
+                                        copiedConf),
+                                InetAddress.getLoopbackAddress().getHostAddress(),
+                                tmpWorkingDirectory);
 
-				Task task = new Task(
-						jobInformation,
-						taskInformation,
-						executionAttemptID,
-						slotAllocationId,
-						0,       // subtaskIndex
-						0,       // attemptNumber
-						Collections.<ResultPartitionDeploymentDescriptor>emptyList(),
-						Collections.<InputGateDeploymentDescriptor>emptyList(),
-						0,       // targetSlotNumber
-						null,    // taskStateHandles,
-						memoryManager,
-						ioManager,
-						networkEnvironment,
-						new BroadcastVariableManager(),
-						new NoOpTaskManagerActions(),
-						new NoOpInputSplitProvider(),
-						new NoOpCheckpointResponder(),
-						new FallbackLibraryCacheManager(),
-						new FileCache(tmInfo.getTmpDirectories()),
-						tmInfo,
-						new UnregisteredTaskMetricsGroup(),
-						new NoOpResultPartitionConsumableNotifier(),
-						new NoOpPartitionProducerStateChecker(),
-						executor);
+                final Executor executor = Executors.newCachedThreadPool();
 
-				System.err.println("starting task thread");
+                final TaskLocalStateStore localStateStore =
+                        new TaskLocalStateStoreImpl(
+                                jid,
+                                allocationID,
+                                jobVertexId,
+                                executionAttemptID.getSubtaskIndex(),
+                                TestLocalRecoveryConfig.disabled(),
+                                executor);
 
-				task.startTaskThread();
-			}
-			catch (Throwable t) {
-				System.err.println("ERROR STARTING TASK");
-				t.printStackTrace();
-			}
+                final StateChangelogStorage<?> changelogStorage =
+                        new InMemoryStateChangelogStorage();
 
-			System.err.println("parking the main thread");
-			CommonTestUtils.blockForeverNonInterruptibly();
-		}
+                final TaskStateManager slotStateManager =
+                        new TaskStateManagerImpl(
+                                jid,
+                                executionAttemptID,
+                                localStateStore,
+                                null,
+                                changelogStorage,
+                                new TaskExecutorStateChangelogStoragesManager(),
+                                null,
+                                NoOpCheckpointResponder.INSTANCE);
 
-		public static final class OomInvokable extends AbstractInvokable {
+                Task task =
+                        new Task(
+                                jobInformation,
+                                taskInformation,
+                                executionAttemptID,
+                                slotAllocationId,
+                                Collections.<ResultPartitionDeploymentDescriptor>emptyList(),
+                                Collections.<InputGateDeploymentDescriptor>emptyList(),
+                                memoryManager,
+                                new SharedResources(),
+                                ioManager,
+                                shuffleEnvironment,
+                                new KvStateService(new KvStateRegistry(), null, null),
+                                new BroadcastVariableManager(),
+                                new TaskEventDispatcher(),
+                                ExternalResourceInfoProvider.NO_EXTERNAL_RESOURCES,
+                                slotStateManager,
+                                new NoOpTaskManagerActions(),
+                                new NoOpInputSplitProvider(),
+                                NoOpCheckpointResponder.INSTANCE,
+                                new NoOpTaskOperatorEventGateway(),
+                                new TestGlobalAggregateManager(),
+                                TestingClassLoaderLease.newBuilder().build(),
+                                new FileCache(
+                                        tmInfo.getTmpDirectories(),
+                                        VoidPermanentBlobService.INSTANCE),
+                                tmInfo,
+                                UnregisteredMetricGroups.createUnregisteredTaskMetricGroup(),
+                                new NoOpPartitionProducerStateChecker(),
+                                executor,
+                                new ChannelStateWriteRequestExecutorFactory(
+                                        jobInformation.getJobId()));
 
-			@Override
-			public void invoke() throws Exception {
-				throw new OutOfMemoryError();
-			}
-		}
+                System.err.println("starting task thread");
 
-		private static final class NoOpTaskManagerActions implements TaskManagerActions {
+                task.startTaskThread();
+            } catch (Throwable t) {
+                System.err.println("ERROR STARTING TASK");
+                t.printStackTrace();
+            }
 
-			@Override
-			public void notifyFinalState(ExecutionAttemptID executionAttemptID) {}
+            System.err.println("parking the main thread");
+            CommonTestUtils.blockForeverNonInterruptibly();
+        }
 
-			@Override
-			public void notifyFatalError(String message, Throwable cause) {}
+        public static final class OomInvokable extends AbstractInvokable {
 
-			@Override
-			public void failTask(ExecutionAttemptID executionAttemptID, Throwable cause) {}
+            public OomInvokable(Environment environment) {
+                super(environment);
+            }
 
-			@Override
-			public void updateTaskExecutionState(TaskExecutionState taskExecutionState) {}
-		}
+            @Override
+            public void invoke() throws Exception {
+                throw new OutOfMemoryError();
+            }
+        }
 
-		private static final class NoOpInputSplitProvider implements InputSplitProvider {
+        private static final class NoOpInputSplitProvider implements InputSplitProvider {
 
-			@Override
-			public InputSplit getNextInputSplit(ClassLoader userCodeClassLoader) {
-				return null;
-			}
-		}
-
-		private static final class NoOpCheckpointResponder implements CheckpointResponder {
-
-			@Override
-			public void acknowledgeCheckpoint(JobID j, ExecutionAttemptID e, long i, CheckpointMetrics c, SubtaskState s) {}
-
-			@Override
-			public void declineCheckpoint(JobID j, ExecutionAttemptID e, long l, Throwable t) {}
-		}
-
-		private static final class NoOpResultPartitionConsumableNotifier implements ResultPartitionConsumableNotifier {
-
-			@Override
-			public void notifyPartitionConsumable(JobID j, ResultPartitionID p, TaskActions t) {}
-		}
-
-		private static final class NoOpPartitionProducerStateChecker implements PartitionProducerStateChecker {
-
-			@Override
-			public Future<ExecutionState> requestPartitionProducerState(
-					JobID jobId, IntermediateDataSetID intermediateDataSetId, ResultPartitionID r) {
-				return null;
-			}
-		}
-	}
+            @Override
+            public InputSplit getNextInputSplit(ClassLoader userCodeClassLoader) {
+                return null;
+            }
+        }
+    }
 }

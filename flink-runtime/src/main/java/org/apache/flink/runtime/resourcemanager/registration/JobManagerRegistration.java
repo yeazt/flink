@@ -21,47 +21,39 @@ package org.apache.flink.runtime.resourcemanager.registration;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.runtime.clusterframework.types.ResourceID;
 import org.apache.flink.runtime.jobmaster.JobMasterGateway;
+import org.apache.flink.runtime.jobmaster.JobMasterId;
 import org.apache.flink.util.Preconditions;
-
-import java.util.UUID;
 
 /**
  * Container for JobManager related registration information, such as the leader id or the job id.
  */
 public class JobManagerRegistration {
-	private final JobID jobID;
+    private final JobID jobID;
 
-	private final ResourceID jobManagerResourceID;
+    private final ResourceID jobManagerResourceID;
 
-	private final UUID leaderID;
+    private final JobMasterGateway jobManagerGateway;
 
-	private final JobMasterGateway jobManagerGateway;
+    public JobManagerRegistration(
+            JobID jobID, ResourceID jobManagerResourceID, JobMasterGateway jobManagerGateway) {
+        this.jobID = Preconditions.checkNotNull(jobID);
+        this.jobManagerResourceID = Preconditions.checkNotNull(jobManagerResourceID);
+        this.jobManagerGateway = Preconditions.checkNotNull(jobManagerGateway);
+    }
 
-	public JobManagerRegistration(
-			JobID jobID,
-			ResourceID jobManagerResourceID,
-			UUID leaderID,
-			JobMasterGateway jobManagerGateway) {
-		this.jobID = Preconditions.checkNotNull(jobID);
-		this.jobManagerResourceID = Preconditions.checkNotNull(jobManagerResourceID);
-		this.leaderID = Preconditions.checkNotNull(leaderID);
-		this.jobManagerGateway = Preconditions.checkNotNull(jobManagerGateway);
-	}
+    public JobID getJobID() {
+        return jobID;
+    }
 
-	public JobID getJobID() {
-		return jobID;
-	}
+    public ResourceID getJobManagerResourceID() {
+        return jobManagerResourceID;
+    }
 
-	public ResourceID getJobManagerResourceID() {
-		return jobManagerResourceID;
-	}
+    public JobMasterId getJobMasterId() {
+        return jobManagerGateway.getFencingToken();
+    }
 
-	public UUID getLeaderID() {
-		return leaderID;
-	}
-
-	public JobMasterGateway getJobManagerGateway() {
-		return jobManagerGateway;
-	}
-
+    public JobMasterGateway getJobManagerGateway() {
+        return jobManagerGateway;
+    }
 }

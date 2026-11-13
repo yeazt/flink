@@ -15,72 +15,74 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.flink.runtime.security.modules;
 
-import org.apache.flink.runtime.security.SecurityUtils;
+import org.apache.flink.runtime.security.SecurityConfiguration;
 
-/**
- * Responsible for installing a process-wide ZooKeeper security configuration.
- */
+import static org.apache.flink.util.Preconditions.checkNotNull;
+
+/** Responsible for installing a process-wide ZooKeeper security configuration. */
 public class ZooKeeperModule implements SecurityModule {
 
-	private static final String ZOOKEEPER_SASL_CLIENT_USERNAME = "zookeeper.sasl.client.username";
+    private static final String ZOOKEEPER_SASL_CLIENT_USERNAME = "zookeeper.sasl.client.username";
 
-	/**
-	 * A system property for setting whether ZK uses SASL.
-	 */
-	private static final String ZK_ENABLE_CLIENT_SASL = "zookeeper.sasl.client";
+    /** A system property for setting whether ZK uses SASL. */
+    private static final String ZK_ENABLE_CLIENT_SASL = "zookeeper.sasl.client";
 
-	/**
-	 * A system property for setting the expected ZooKeeper service name.
-	 */
-	private static final String ZK_SASL_CLIENT_USERNAME = "zookeeper.sasl.client.username";
+    /** A system property for setting the expected ZooKeeper service name. */
+    private static final String ZK_SASL_CLIENT_USERNAME = "zookeeper.sasl.client.username";
 
-	/**
-	 * A system property for setting the login context name to use.
-	 */
-	private static final String ZK_LOGIN_CONTEXT_NAME = "zookeeper.sasl.clientconfig";
+    /** A system property for setting the login context name to use. */
+    private static final String ZK_LOGIN_CONTEXT_NAME = "zookeeper.sasl.clientconfig";
 
-	private String priorSaslEnable;
+    private final SecurityConfiguration securityConfig;
 
-	private String priorServiceName;
+    private String priorSaslEnable;
 
-	private String priorLoginContextName;
+    private String priorServiceName;
 
-	@Override
-	public void install(SecurityUtils.SecurityConfiguration configuration) throws SecurityInstallException {
+    private String priorLoginContextName;
 
-		priorSaslEnable = System.getProperty(ZK_ENABLE_CLIENT_SASL, null);
-		System.setProperty(ZK_ENABLE_CLIENT_SASL, String.valueOf(!configuration.isZkSaslDisable()));
+    public ZooKeeperModule(SecurityConfiguration securityConfig) {
+        this.securityConfig = checkNotNull(securityConfig);
+    }
 
-		priorServiceName = System.getProperty(ZK_SASL_CLIENT_USERNAME, null);
-		if (!"zookeeper".equals(configuration.getZooKeeperServiceName())) {
-			System.setProperty(ZK_SASL_CLIENT_USERNAME, configuration.getZooKeeperServiceName());
-		}
+    @Override
+    public void install() throws SecurityInstallException {
 
-		priorLoginContextName = System.getProperty(ZK_LOGIN_CONTEXT_NAME, null);
-		if (!"Client".equals(configuration.getZooKeeperLoginContextName())) {
-			System.setProperty(ZK_LOGIN_CONTEXT_NAME, configuration.getZooKeeperLoginContextName());
-		}
-	}
+        priorSaslEnable = System.getProperty(ZK_ENABLE_CLIENT_SASL, null);
+        System.setProperty(
+                ZK_ENABLE_CLIENT_SASL, String.valueOf(!securityConfig.isZkSaslDisable()));
 
-	@Override
-	public void uninstall() throws SecurityInstallException {
-		if(priorSaslEnable != null) {
-			System.setProperty(ZK_ENABLE_CLIENT_SASL, priorSaslEnable);
-		} else {
-			System.clearProperty(ZK_ENABLE_CLIENT_SASL);
-		}
-		if(priorServiceName != null) {
-			System.setProperty(ZK_SASL_CLIENT_USERNAME, priorServiceName);
-		} else {
-			System.clearProperty(ZK_SASL_CLIENT_USERNAME);
-		}
-		if(priorLoginContextName != null) {
-			System.setProperty(ZK_LOGIN_CONTEXT_NAME, priorLoginContextName);
-		} else {
-			System.clearProperty(ZK_LOGIN_CONTEXT_NAME);
-		}
-	}
+        priorServiceName = System.getProperty(ZK_SASL_CLIENT_USERNAME, null);
+        if (!"zookeeper".equals(securityConfig.getZooKeeperServiceName())) {
+            System.setProperty(ZK_SASL_CLIENT_USERNAME, securityConfig.getZooKeeperServiceName());
+        }
 
+        priorLoginContextName = System.getProperty(ZK_LOGIN_CONTEXT_NAME, null);
+        if (!"Client".equals(securityConfig.getZooKeeperLoginContextName())) {
+            System.setProperty(
+                    ZK_LOGIN_CONTEXT_NAME, securityConfig.getZooKeeperLoginContextName());
+        }
+    }
+
+    @Override
+    public void uninstall() throws SecurityInstallException {
+        if (priorSaslEnable != null) {
+            System.setProperty(ZK_ENABLE_CLIENT_SASL, priorSaslEnable);
+        } else {
+            System.clearProperty(ZK_ENABLE_CLIENT_SASL);
+        }
+        if (priorServiceName != null) {
+            System.setProperty(ZK_SASL_CLIENT_USERNAME, priorServiceName);
+        } else {
+            System.clearProperty(ZK_SASL_CLIENT_USERNAME);
+        }
+        if (priorLoginContextName != null) {
+            System.setProperty(ZK_LOGIN_CONTEXT_NAME, priorLoginContextName);
+        } else {
+            System.clearProperty(ZK_LOGIN_CONTEXT_NAME);
+        }
+    }
 }

@@ -18,24 +18,38 @@
 
 package org.apache.flink.runtime.webmonitor;
 
-import org.apache.flink.runtime.webmonitor.history.JsonArchivist;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.JobManagerOptions;
+import org.apache.flink.runtime.webmonitor.handlers.JarUploadHandler;
+import org.apache.flink.util.concurrent.Executors;
 
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
-/**
- * Tests for the WebMonitorUtils.
- */
-public class WebMonitorUtilsTest {
+import java.nio.file.Paths;
+import java.time.Duration;
+import java.util.Collections;
+import java.util.concurrent.CompletableFuture;
 
-	@Test
-	public void testGetArchivers() {
-		JsonArchivist[] direct = WebRuntimeMonitor.getJsonArchivists();
-		JsonArchivist[] reflected = WebMonitorUtils.getJsonArchivists();
+import static org.assertj.core.api.Assertions.assertThat;
 
-		Assert.assertEquals(direct.length, reflected.length);
-		for (int x = 0; x < direct.length; x++) {
-			Assert.assertSame(direct[x].getClass(), reflected[x].getClass());
-		}
-	}
+/** Tests for the WebMonitorUtils. */
+class WebMonitorUtilsTest {
+
+    /** Tests dynamically loading of handlers such as {@link JarUploadHandler}. */
+    @Test
+    void testLoadWebSubmissionExtension() throws Exception {
+        final Configuration configuration = new Configuration();
+        configuration.set(JobManagerOptions.ADDRESS, "localhost");
+        final WebMonitorExtension webMonitorExtension =
+                WebMonitorUtils.loadWebSubmissionExtension(
+                        CompletableFuture::new,
+                        Duration.ofSeconds(10),
+                        Collections.emptyMap(),
+                        CompletableFuture.completedFuture("localhost:12345"),
+                        Paths.get("/tmp"),
+                        Executors.directExecutor(),
+                        configuration);
+
+        assertThat(webMonitorExtension).isNotNull();
+    }
 }

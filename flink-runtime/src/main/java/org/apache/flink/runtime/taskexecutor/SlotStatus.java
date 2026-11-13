@@ -18,6 +18,7 @@
 
 package org.apache.flink.runtime.taskexecutor;
 
+import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.runtime.clusterframework.types.AllocationID;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
@@ -27,107 +28,144 @@ import java.io.Serializable;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
-/**
- * This describes the slot current status which located in TaskManager.
- */
+/** This describes the slot current status which located in TaskManager. */
 public class SlotStatus implements Serializable {
 
-	private static final long serialVersionUID = 5099191707339664493L;
+    private static final long serialVersionUID = 5099191707339664493L;
 
-	/** slotID to identify a slot */
-	private final SlotID slotID;
+    /** SlotID to identify a slot. */
+    private final SlotID slotID;
 
-	/** the resource profile of the slot */
-	private final ResourceProfile resourceProfile;
+    /** The resource profile of the slot. */
+    private final ResourceProfile resourceProfile;
 
-	/** if the slot is allocated, allocationId identify its allocation; else, allocationId is null */
-	private final AllocationID allocationID;
+    /**
+     * If the slot is allocated, allocationId identify its allocation; else, allocationId is null.
+     */
+    private final AllocationID allocationID;
 
-	/** if the slot is allocated, jobId identify which job this slot is allocated to; else, jobId is null */
-	private final JobID jobID;
+    /**
+     * If the slot is allocated, jobId identify which job this slot is allocated to; else, jobId is
+     * null.
+     */
+    private final JobID jobID;
 
-	public SlotStatus(SlotID slotID, ResourceProfile resourceProfile) {
-		this(slotID, resourceProfile, null, null);
-	}
+    private final int assignedTasks;
 
-	public SlotStatus(
-			SlotID slotID,
-			ResourceProfile resourceProfile,
-			JobID jobID,
-			AllocationID allocationID) {
-		this.slotID = checkNotNull(slotID, "slotID cannot be null");
-		this.resourceProfile = checkNotNull(resourceProfile, "profile cannot be null");
-		this.allocationID = allocationID;
-		this.jobID = jobID;
-	}
+    @VisibleForTesting
+    public SlotStatus(SlotID slotID, ResourceProfile resourceProfile) {
+        this(slotID, resourceProfile, null, null, 0);
+    }
 
-	/**
-	 * Get the unique identification of this slot
-	 *
-	 * @return The slot id
-	 */
-	public SlotID getSlotID() {
-		return slotID;
-	}
+    @VisibleForTesting
+    public SlotStatus(
+            SlotID slotID,
+            ResourceProfile resourceProfile,
+            JobID jobID,
+            AllocationID allocationID) {
+        this(slotID, resourceProfile, jobID, allocationID, 0);
+    }
 
-	/**
-	 * Get the resource profile of this slot
-	 *
-	 * @return The resource profile
-	 */
-	public ResourceProfile getResourceProfile() {
-		return resourceProfile;
-	}
+    public SlotStatus(
+            SlotID slotID,
+            ResourceProfile resourceProfile,
+            JobID jobID,
+            AllocationID allocationID,
+            int assignedTasks) {
+        this.slotID = checkNotNull(slotID, "slotID cannot be null");
+        this.resourceProfile = checkNotNull(resourceProfile, "profile cannot be null");
+        this.allocationID = allocationID;
+        this.jobID = jobID;
+        this.assignedTasks = assignedTasks;
+    }
 
-	/**
-	 * Get the allocation id of this slot
-	 *
-	 * @return The allocation id if this slot is allocated, otherwise null
-	 */
-	public AllocationID getAllocationID() {
-		return allocationID;
-	}
+    /**
+     * Get the unique identification of this slot.
+     *
+     * @return The slot id
+     */
+    public SlotID getSlotID() {
+        return slotID;
+    }
 
-	/**
-	 * Get the job id of the slot allocated for
-	 *
-	 * @return The job id if this slot is allocated, otherwise null
-	 */
-	public JobID getJobID() {
-		return jobID;
-	}
+    /**
+     * Get the resource profile of this slot.
+     *
+     * @return The resource profile
+     */
+    public ResourceProfile getResourceProfile() {
+        return resourceProfile;
+    }
 
-	@Override
-	public boolean equals(Object o) {
-		if (this == o) {
-			return true;
-		}
-		if (o == null || getClass() != o.getClass()) {
-			return false;
-		}
+    /**
+     * Get the allocation id of this slot.
+     *
+     * @return The allocation id if this slot is allocated, otherwise null
+     */
+    public AllocationID getAllocationID() {
+        return allocationID;
+    }
 
-		SlotStatus that = (SlotStatus) o;
+    /**
+     * Get the job id of the slot allocated for.
+     *
+     * @return The job id if this slot is allocated, otherwise null
+     */
+    public JobID getJobID() {
+        return jobID;
+    }
 
-		if (!slotID.equals(that.slotID)) {
-			return false;
-		}
-		if (!resourceProfile.equals(that.resourceProfile)) {
-			return false;
-		}
-		if (allocationID != null ? !allocationID.equals(that.allocationID) : that.allocationID != null) {
-			return false;
-		}
-		return jobID != null ? jobID.equals(that.jobID) : that.jobID == null;
+    public int getAssignedTasks() {
+        return assignedTasks;
+    }
 
-	}
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
 
-	@Override
-	public int hashCode() {
-		int result = slotID.hashCode();
-		result = 31 * result + resourceProfile.hashCode();
-		result = 31 * result + (allocationID != null ? allocationID.hashCode() : 0);
-		result = 31 * result + (jobID != null ? jobID.hashCode() : 0);
-		return result;
-	}
+        SlotStatus that = (SlotStatus) o;
 
+        if (!slotID.equals(that.slotID)) {
+            return false;
+        }
+        if (!resourceProfile.equals(that.resourceProfile)) {
+            return false;
+        }
+        if (allocationID != null
+                ? !allocationID.equals(that.allocationID)
+                : that.allocationID != null) {
+            return false;
+        }
+        return jobID != null ? jobID.equals(that.jobID) : that.jobID == null;
+    }
+
+    @Override
+    public int hashCode() {
+        int result = slotID.hashCode();
+        result = 31 * result + resourceProfile.hashCode();
+        result = 31 * result + (allocationID != null ? allocationID.hashCode() : 0);
+        result = 31 * result + (jobID != null ? jobID.hashCode() : 0);
+        return result;
+    }
+
+    @Override
+    public String toString() {
+        return "SlotStatus{"
+                + "slotID="
+                + slotID
+                + ", allocationID="
+                + allocationID
+                + ", jobID="
+                + jobID
+                + ", assignedTasks="
+                + assignedTasks
+                + ", resourceProfile="
+                + resourceProfile
+                + '}';
+    }
 }

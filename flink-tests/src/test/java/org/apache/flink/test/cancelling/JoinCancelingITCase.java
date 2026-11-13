@@ -16,161 +16,190 @@
  * limitations under the License.
  */
 
-
 package org.apache.flink.test.cancelling;
 
 import org.apache.flink.api.common.functions.JoinFunction;
+import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.common.functions.RichJoinFunction;
-import org.apache.flink.api.common.operators.base.JoinOperatorBase;
-import org.apache.flink.api.java.DataSet;
-import org.apache.flink.api.java.ExecutionEnvironment;
-import org.apache.flink.api.java.io.DiscardingOutputFormat;
 import org.apache.flink.api.java.tuple.Tuple2;
-import org.apache.flink.configuration.Configuration;
-import org.apache.flink.runtime.operators.testutils.UniformIntTupleGenerator;
+import org.apache.flink.streaming.api.datastream.DataStreamSource;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.sink.v2.DiscardingSink;
+import org.apache.flink.streaming.api.windowing.assigners.GlobalWindows;
 import org.apache.flink.test.util.InfiniteIntegerTupleInputFormat;
 import org.apache.flink.test.util.UniformIntTupleGeneratorInputFormat;
 
-public class JoinCancelingITCase extends CancelingTestBase {
-	private static final int parallelism = 4;
+import org.junit.jupiter.api.Disabled;
+import org.junit.jupiter.api.Test;
 
-	public JoinCancelingITCase() {
-		setTaskManagerNumSlots(parallelism);
-	}
-	
-	// --------------- Test Sort Matches that are canceled while still reading / sorting -----------------
-	private void executeTask(JoinFunction<Tuple2<Integer, Integer>, Tuple2<Integer, Integer>, Tuple2<Integer, Integer>> joiner, boolean slow) throws Exception {
-		executeTask(joiner, slow, parallelism);
-	}
+/** Test job cancellation from within a JoinFunction. */
+@Disabled("Takes too long.")
+class JoinCancelingITCase extends CancelingTestBase {
 
-	private void executeTask(JoinFunction<Tuple2<Integer, Integer>, Tuple2<Integer, Integer>, Tuple2<Integer, Integer>> joiner, boolean slow, int parallelism) throws Exception {
-		ExecutionEnvironment env = ExecutionEnvironment.getExecutionEnvironment();
-		DataSet<Tuple2<Integer, Integer>> input1 = env.createInput(new InfiniteIntegerTupleInputFormat(slow));
-		DataSet<Tuple2<Integer, Integer>> input2 = env.createInput(new InfiniteIntegerTupleInputFormat(slow));
+    // --------------- Test Sort Matches that are canceled while still reading / sorting
+    // -----------------
+    private void executeTask(
+            JoinFunction<
+                            Tuple2<Integer, Integer>,
+                            Tuple2<Integer, Integer>,
+                            Tuple2<Integer, Integer>>
+                    joiner,
+            boolean slow)
+            throws Exception {
+        executeTask(joiner, slow, PARALLELISM);
+    }
 
-		input1.join(input2, JoinOperatorBase.JoinHint.REPARTITION_SORT_MERGE)
-				.where(0)
-				.equalTo(0)
-				.with(joiner)
-				.output(new DiscardingOutputFormat<Tuple2<Integer, Integer>>());
+    private void executeTask(
+            JoinFunction<
+                            Tuple2<Integer, Integer>,
+                            Tuple2<Integer, Integer>,
+                            Tuple2<Integer, Integer>>
+                    joiner,
+            boolean slow,
+            int parallelism)
+            throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        DataStreamSource<Tuple2<Integer, Integer>> input1 =
+                env.createInput(new InfiniteIntegerTupleInputFormat(slow));
+        DataStreamSource<Tuple2<Integer, Integer>> input2 =
+                env.createInput(new InfiniteIntegerTupleInputFormat(slow));
 
-		env.setParallelism(parallelism);
+        input1.join(input2)
+                .where(value -> value.f0)
+                .equalTo(value -> value.f0)
+                .window(GlobalWindows.createWithEndOfStreamTrigger())
+                .apply(joiner)
+                .sinkTo(new DiscardingSink<>());
 
-		runAndCancelJob(env.createProgramPlan(), 5 * 1000, 10 * 1000);
-	}
+        env.setParallelism(parallelism);
 
-//	@Test
-	public void testCancelSortMatchWhileReadingSlowInputs() throws Exception {
-		executeTask(new SimpleMatcher<Integer>(), true);
-	}
+        runAndCancelJob(env.getStreamGraph().getJobGraph(), 5 * 1000, 10 * 1000);
+    }
 
-//	@Test
-	public void testCancelSortMatchWhileReadingFastInputs() throws Exception {
-		executeTask(new SimpleMatcher<Integer>(), false);
-	}
-	
-//	@Test
-	public void testCancelSortMatchPriorToFirstRecordReading() throws Exception {
-		executeTask(new StuckInOpenMatcher<Integer>(), false);
-	}
+    @Test
+    void testCancelWhileReadingSlowInputs() throws Exception {
+        executeTask(new SimpleMatcher<Integer>(), true);
+    }
 
-	private void executeTaskWithGenerator(
-			JoinFunction<Tuple2<Integer, Integer>, Tuple2<Integer, Integer>, Tuple2<Integer, Integer>> joiner,
-			int keys, int vals, int msecsTillCanceling, int maxTimeTillCanceled) throws Exception {
-		UniformIntTupleGenerator g = new UniformIntTupleGenerator(keys, vals, false);
-		ExecutionEnvironment env = ExecutionEnvironment.getExecutionEnvironment();
-		DataSet<Tuple2<Integer, Integer>> input1 = env.createInput(new UniformIntTupleGeneratorInputFormat(keys, vals));
-		DataSet<Tuple2<Integer, Integer>> input2 = env.createInput(new UniformIntTupleGeneratorInputFormat(keys, vals));
+    @Test
+    void testCancelWhileReadingFastInputs() throws Exception {
+        executeTask(new SimpleMatcher<Integer>(), false);
+    }
 
-		input1.join(input2, JoinOperatorBase.JoinHint.REPARTITION_SORT_MERGE)
-				.where(0)
-				.equalTo(0)
-				.with(joiner)
-				.output(new DiscardingOutputFormat<Tuple2<Integer, Integer>>());
+    @Test
+    void testCancelPriorToFirstRecordReading() throws Exception {
+        executeTask(new StuckInOpenMatcher<Integer>(), false);
+    }
 
-		env.setParallelism(parallelism);
+    private void executeTaskWithGenerator(
+            JoinFunction<
+                            Tuple2<Integer, Integer>,
+                            Tuple2<Integer, Integer>,
+                            Tuple2<Integer, Integer>>
+                    joiner,
+            int keys,
+            int vals,
+            int msecsTillCanceling,
+            int maxTimeTillCanceled)
+            throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        DataStreamSource<Tuple2<Integer, Integer>> input1 =
+                env.createInput(new UniformIntTupleGeneratorInputFormat(keys, vals));
+        DataStreamSource<Tuple2<Integer, Integer>> input2 =
+                env.createInput(new UniformIntTupleGeneratorInputFormat(keys, vals));
 
-		runAndCancelJob(env.createProgramPlan(), msecsTillCanceling, maxTimeTillCanceled);
-	}
-	
-//	@Test
-	public void testCancelSortMatchWhileDoingHeavySorting() throws Exception {
-		executeTaskWithGenerator(new SimpleMatcher<Integer>(), 50000, 100, 30 * 1000, 30 * 1000);
-	}
+        input1.join(input2)
+                .where(value -> value.f0)
+                .equalTo(value -> value.f0)
+                .window(GlobalWindows.createWithEndOfStreamTrigger())
+                .apply(joiner)
+                .sinkTo(new DiscardingSink<>());
 
-	// --------------- Test Sort Matches that are canceled while in the Matching Phase -----------------
-	
-//	@Test
-	public void testCancelSortMatchWhileJoining() throws Exception {
-		executeTaskWithGenerator(new DelayingMatcher<Integer>(), 500, 3, 10 * 1000, 20 * 1000);
-	}
-	
-//	@Test
-	public void testCancelSortMatchWithLongCancellingResponse() throws Exception {
-		executeTaskWithGenerator(new LongCancelTimeMatcher<Integer>(), 500, 3, 10 * 1000, 10 * 1000);
-	}
+        runAndCancelJob(
+                env.getStreamGraph().getJobGraph(), msecsTillCanceling, maxTimeTillCanceled);
+    }
 
-	// -------------------------------------- Test System corner cases ---------------------------------
-	
-//	@Test
-	public void testCancelSortMatchWithHighparallelism() throws Exception {
-		executeTask(new SimpleMatcher<Integer>(), false, 64);
-	}
+    // --------------- Test Sort Matches that are canceled while in the Matching Phase
+    // -----------------
 
-	// --------------------------------------------------------------------------------------------
-	
-	public static final class SimpleMatcher<IN> implements JoinFunction<Tuple2<IN, IN>, Tuple2<IN, IN>, Tuple2<IN, IN>> {
-		private static final long serialVersionUID = 1L;
-		
-		@Override
-		public Tuple2<IN, IN> join(Tuple2<IN, IN> first, Tuple2<IN, IN> second) throws Exception {
-			return new Tuple2<>(first.f0, second.f0);
-		}
-	}
-	
-	public static final class DelayingMatcher<IN> implements JoinFunction<Tuple2<IN, IN>, Tuple2<IN, IN>, Tuple2<IN, IN>> {
-		private static final long serialVersionUID = 1L;
-		
-		private static final int WAIT_TIME_PER_RECORD = 10 * 1000; // 10 sec.
+    @Test
+    void testCancelWhileJoining() throws Exception {
+        executeTaskWithGenerator(new DelayingMatcher<Integer>(), 500, 3, 10 * 1000, 20 * 1000);
+    }
 
-		@Override
-		public Tuple2<IN, IN> join(Tuple2<IN, IN> first, Tuple2<IN, IN> second) throws Exception {
-			Thread.sleep(WAIT_TIME_PER_RECORD);
-			return new Tuple2<>(first.f0, second.f0);
-		}
-	}
-	
-	public static final class LongCancelTimeMatcher<IN> implements JoinFunction<Tuple2<IN, IN>, Tuple2<IN, IN>, Tuple2<IN, IN>> {
-		private static final long serialVersionUID = 1L;
-		
-		private static final int WAIT_TIME_PER_RECORD = 5 * 1000; // 5 sec.
-		
-		@Override
-		public Tuple2<IN, IN> join(Tuple2<IN, IN> first, Tuple2<IN, IN> second) throws Exception {
-			final long start = System.currentTimeMillis();
-			long remaining = WAIT_TIME_PER_RECORD;
-			do {
-				try {
-					Thread.sleep(remaining);
-				} catch (InterruptedException iex) {}
-			} while ((remaining = WAIT_TIME_PER_RECORD - System.currentTimeMillis() + start) > 0);
-			return new Tuple2<>(first.f0, second.f0);
-		}
-	}
-	
-	public static final class StuckInOpenMatcher<IN> extends RichJoinFunction<Tuple2<IN, IN>, Tuple2<IN, IN>, Tuple2<IN, IN>> {
-		private static final long serialVersionUID = 1L;
-		
-		@Override
-		public void open(Configuration parameters) throws Exception {
-			synchronized (this) {
-				wait();
-			}
-		}
+    @Test
+    void testCancelWithLongCancellingResponse() throws Exception {
+        executeTaskWithGenerator(
+                new LongCancelTimeMatcher<Integer>(), 500, 3, 10 * 1000, 10 * 1000);
+    }
 
-		@Override
-		public Tuple2<IN, IN> join(Tuple2<IN, IN> first, Tuple2<IN, IN> second) throws Exception {
-			return new Tuple2<>(first.f0, second.f0);
-		}
-	}
+    // -------------------------------------- Test System corner cases
+    // ---------------------------------
+
+    @Test
+    void testCancelWithHighparallelism() throws Exception {
+        executeTask(new SimpleMatcher<Integer>(), false, 64);
+    }
+
+    // --------------------------------------------------------------------------------------------
+
+    private static final class SimpleMatcher<IN>
+            implements JoinFunction<Tuple2<IN, IN>, Tuple2<IN, IN>, Tuple2<IN, IN>> {
+        private static final long serialVersionUID = 1L;
+
+        @Override
+        public Tuple2<IN, IN> join(Tuple2<IN, IN> first, Tuple2<IN, IN> second) throws Exception {
+            return new Tuple2<>(first.f0, second.f0);
+        }
+    }
+
+    private static final class DelayingMatcher<IN>
+            implements JoinFunction<Tuple2<IN, IN>, Tuple2<IN, IN>, Tuple2<IN, IN>> {
+        private static final long serialVersionUID = 1L;
+
+        private static final int WAIT_TIME_PER_RECORD = 10 * 1000; // 10 sec.
+
+        @Override
+        public Tuple2<IN, IN> join(Tuple2<IN, IN> first, Tuple2<IN, IN> second) throws Exception {
+            Thread.sleep(WAIT_TIME_PER_RECORD);
+            return new Tuple2<>(first.f0, second.f0);
+        }
+    }
+
+    private static final class LongCancelTimeMatcher<IN>
+            implements JoinFunction<Tuple2<IN, IN>, Tuple2<IN, IN>, Tuple2<IN, IN>> {
+        private static final long serialVersionUID = 1L;
+
+        private static final int WAIT_TIME_PER_RECORD = 5 * 1000; // 5 sec.
+
+        @Override
+        public Tuple2<IN, IN> join(Tuple2<IN, IN> first, Tuple2<IN, IN> second) throws Exception {
+            final long start = System.currentTimeMillis();
+            long remaining = WAIT_TIME_PER_RECORD;
+            do {
+                try {
+                    Thread.sleep(remaining);
+                } catch (InterruptedException iex) {
+                }
+            } while ((remaining = WAIT_TIME_PER_RECORD - System.currentTimeMillis() + start) > 0);
+            return new Tuple2<>(first.f0, second.f0);
+        }
+    }
+
+    private static final class StuckInOpenMatcher<IN>
+            extends RichJoinFunction<Tuple2<IN, IN>, Tuple2<IN, IN>, Tuple2<IN, IN>> {
+        private static final long serialVersionUID = 1L;
+
+        @Override
+        public void open(OpenContext openContext) throws Exception {
+            synchronized (this) {
+                wait();
+            }
+        }
+
+        @Override
+        public Tuple2<IN, IN> join(Tuple2<IN, IN> first, Tuple2<IN, IN> second) throws Exception {
+            return new Tuple2<>(first.f0, second.f0);
+        }
+    }
 }

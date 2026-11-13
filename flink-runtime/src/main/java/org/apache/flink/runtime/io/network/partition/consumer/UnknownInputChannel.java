@@ -18,109 +18,213 @@
 
 package org.apache.flink.runtime.io.network.partition.consumer;
 
-import org.apache.flink.runtime.metrics.groups.TaskIOMetricGroup;
+import org.apache.flink.runtime.checkpoint.CheckpointException;
+import org.apache.flink.runtime.checkpoint.channel.ChannelStateWriter;
 import org.apache.flink.runtime.event.TaskEvent;
 import org.apache.flink.runtime.io.network.ConnectionID;
 import org.apache.flink.runtime.io.network.ConnectionManager;
-import org.apache.flink.runtime.io.network.TaskEventDispatcher;
+import org.apache.flink.runtime.io.network.TaskEventPublisher;
+import org.apache.flink.runtime.io.network.api.CheckpointBarrier;
+import org.apache.flink.runtime.io.network.metrics.InputChannelMetrics;
+import org.apache.flink.runtime.io.network.partition.ChannelStateHolder;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionID;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionManager;
+import org.apache.flink.runtime.io.network.partition.ResultSubpartitionIndexSet;
+import org.apache.flink.util.Preconditions;
+import org.apache.flink.util.concurrent.FutureUtils;
+
+import javax.annotation.Nullable;
 
 import java.io.IOException;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 
+import static org.apache.flink.runtime.checkpoint.CheckpointFailureReason.CHECKPOINT_DECLINED_TASK_NOT_READY;
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
 /**
- * An input channel place holder to be replaced by either a {@link RemoteInputChannel}
- * or {@link LocalInputChannel} at runtime.
+ * An input channel placeholder to be replaced by either a {@link RemoteInputChannel} or {@link
+ * LocalInputChannel} at runtime.
  */
-class UnknownInputChannel extends InputChannel {
+class UnknownInputChannel extends InputChannel implements ChannelStateHolder {
 
-	private final ResultPartitionManager partitionManager;
+    private final ResultPartitionManager partitionManager;
 
-	private final TaskEventDispatcher taskEventDispatcher;
+    private final TaskEventPublisher taskEventPublisher;
 
-	private final ConnectionManager connectionManager;
+    private final ConnectionManager connectionManager;
 
-	/** Initial and maximum backoff (in ms) after failed partition requests. */
-	private final int initialBackoff;
+    /** Initial and maximum backoff (in ms) after failed partition requests. */
+    private final int initialBackoff;
 
-	private final int maxBackoff;
+    private final int maxBackoff;
 
-	private final TaskIOMetricGroup metrics;
+    private final int partitionRequestListenerTimeout;
 
-	public UnknownInputChannel(
-			SingleInputGate gate,
-			int channelIndex,
-			ResultPartitionID partitionId,
-			ResultPartitionManager partitionManager,
-			TaskEventDispatcher taskEventDispatcher,
-			ConnectionManager connectionManager,
-			int initialBackoff,
-			int maxBackoff,
-			TaskIOMetricGroup metrics) {
+    private final int networkBuffersPerChannel;
 
-		super(gate, channelIndex, partitionId, initialBackoff, maxBackoff, null);
+    private final InputChannelMetrics metrics;
 
-		this.partitionManager = checkNotNull(partitionManager);
-		this.taskEventDispatcher = checkNotNull(taskEventDispatcher);
-		this.connectionManager = checkNotNull(connectionManager);
-		this.metrics = checkNotNull(metrics);
-		this.initialBackoff = initialBackoff;
-		this.maxBackoff = maxBackoff;
-	}
+    @Nullable private ChannelStateWriter channelStateWriter;
 
-	@Override
-	public void requestSubpartition(int subpartitionIndex) throws IOException {
-		// Nothing to do here
-	}
+    public UnknownInputChannel(
+            SingleInputGate gate,
+            int channelIndex,
+            ResultPartitionID partitionId,
+            ResultSubpartitionIndexSet consumedSubpartitionIndexSet,
+            ResultPartitionManager partitionManager,
+            TaskEventPublisher taskEventPublisher,
+            ConnectionManager connectionManager,
+            int initialBackoff,
+            int maxBackoff,
+            int partitionRequestListenerTimeout,
+            int networkBuffersPerChannel,
+            InputChannelMetrics metrics) {
 
-	@Override
-	public BufferAndAvailability getNextBuffer() throws IOException {
-		// Nothing to do here
-		throw new UnsupportedOperationException("Cannot retrieve a buffer from an UnknownInputChannel");
-	}
+        super(
+                gate,
+                channelIndex,
+                partitionId,
+                consumedSubpartitionIndexSet,
+                initialBackoff,
+                maxBackoff,
+                null,
+                null);
 
-	@Override
-	public void sendTaskEvent(TaskEvent event) throws IOException {
-		// Nothing to do here
-	}
+        this.partitionManager = checkNotNull(partitionManager);
+        this.taskEventPublisher = checkNotNull(taskEventPublisher);
+        this.connectionManager = checkNotNull(connectionManager);
+        this.metrics = checkNotNull(metrics);
+        this.initialBackoff = initialBackoff;
+        this.maxBackoff = maxBackoff;
+        this.partitionRequestListenerTimeout = partitionRequestListenerTimeout;
+        this.networkBuffersPerChannel = networkBuffersPerChannel;
+    }
 
-	/**
-	 * Returns <code>false</code>.
-	 * <p>
-	 * <strong>Important</strong>: It is important that the method correctly
-	 * always <code>false</code> for unknown input channels in order to not
-	 * finish the consumption of an intermediate result partition early.
-	 */
-	@Override
-	public boolean isReleased() {
-		return false;
-	}
+    @Override
+    public CompletableFuture<Void> getStateConsumedFuture() {
+        return FutureUtils.completedVoidFuture();
+    }
 
-	@Override
-	public void notifySubpartitionConsumed() {
-	}
+    @Override
+    public void resumeConsumption() {
+        throw new UnsupportedOperationException("UnknownInputChannel should never be blocked.");
+    }
 
-	@Override
-	public void releaseAllResources() throws IOException {
-		// Nothing to do here
-	}
+    @Override
+    public void acknowledgeAllRecordsProcessed() throws IOException {
+        throw new UnsupportedOperationException(
+                "UnknownInputChannel should not need acknowledge all records processed.");
+    }
 
-	@Override
-	public String toString() {
-		return "UnknownInputChannel [" + partitionId + "]";
-	}
+    @Override
+    public void requestSubpartitions() throws IOException {
+        // Nothing to do here
+    }
 
-	// ------------------------------------------------------------------------
-	// Graduation to a local or remote input channel at runtime
-	// ------------------------------------------------------------------------
+    @Override
+    protected int peekNextBufferSubpartitionIdInternal() {
+        throw new UnsupportedOperationException();
+    }
 
-	public RemoteInputChannel toRemoteInputChannel(ConnectionID producerAddress) {
-		return new RemoteInputChannel(inputGate, channelIndex, partitionId, checkNotNull(producerAddress), connectionManager, initialBackoff, maxBackoff, metrics);
-	}
+    @Override
+    public Optional<BufferAndAvailability> getNextBuffer() throws IOException {
+        // Nothing to do here
+        throw new UnsupportedOperationException(
+                "Cannot retrieve a buffer from an UnknownInputChannel");
+    }
 
-	public LocalInputChannel toLocalInputChannel() {
-		return new LocalInputChannel(inputGate, channelIndex, partitionId, partitionManager, taskEventDispatcher, initialBackoff, maxBackoff, metrics);
-	}
+    @Override
+    public void sendTaskEvent(TaskEvent event) throws IOException {
+        // Nothing to do here
+    }
+
+    /**
+     * Returns <code>false</code>.
+     *
+     * <p><strong>Important</strong>: It is important that the method correctly always <code>false
+     * </code> for unknown input channels in order to not finish the consumption of an intermediate
+     * result partition early.
+     */
+    @Override
+    public boolean isReleased() {
+        return false;
+    }
+
+    @Override
+    public void releaseAllResources() throws IOException {
+        // Nothing to do here
+    }
+
+    @Override
+    void announceBufferSize(int newBufferSize) {
+        // Not supported.
+    }
+
+    @Override
+    int getBuffersInUseCount() {
+        return 0;
+    }
+
+    @Override
+    public String toString() {
+        return "UnknownInputChannel [" + partitionId + "]";
+    }
+
+    // ------------------------------------------------------------------------
+    // Graduation to a local or remote input channel at runtime
+    // ------------------------------------------------------------------------
+
+    public RemoteInputChannel toRemoteInputChannel(
+            ConnectionID producerAddress, ResultPartitionID resultPartitionID) {
+        RemoteInputChannel channel =
+                new RemoteInputChannel(
+                        inputGate,
+                        getChannelIndex(),
+                        resultPartitionID,
+                        consumedSubpartitionIndexSet,
+                        checkNotNull(producerAddress),
+                        connectionManager,
+                        initialBackoff,
+                        maxBackoff,
+                        partitionRequestListenerTimeout,
+                        networkBuffersPerChannel,
+                        metrics.getNumBytesInRemoteCounter(),
+                        metrics.getNumBuffersInRemoteCounter(),
+                        channelStateWriter == null ? ChannelStateWriter.NO_OP : channelStateWriter,
+                        // Unknown channels exist only in BATCH jobs, which have no channel
+                        // state, so this channel is never in recovery.
+                        false);
+        return channel;
+    }
+
+    public LocalInputChannel toLocalInputChannel(ResultPartitionID resultPartitionID) {
+        return new LocalInputChannel(
+                inputGate,
+                getChannelIndex(),
+                resultPartitionID,
+                consumedSubpartitionIndexSet,
+                partitionManager,
+                taskEventPublisher,
+                initialBackoff,
+                maxBackoff,
+                metrics.getNumBytesInLocalCounter(),
+                metrics.getNumBuffersInLocalCounter(),
+                channelStateWriter == null ? ChannelStateWriter.NO_OP : channelStateWriter,
+                networkBuffersPerChannel,
+                // Unknown channels exist only in BATCH jobs, which have no channel
+                // state, so this channel is never in recovery.
+                false);
+    }
+
+    @Override
+    public void setChannelStateWriter(ChannelStateWriter channelStateWriter) {
+        Preconditions.checkState(this.channelStateWriter == null);
+        this.channelStateWriter = channelStateWriter;
+    }
+
+    @Override
+    public void checkpointStarted(CheckpointBarrier barrier) throws CheckpointException {
+        throw new CheckpointException(CHECKPOINT_DECLINED_TASK_NOT_READY);
+    }
 }

@@ -20,56 +20,40 @@ package org.apache.flink.runtime.jobmaster;
 
 import org.apache.flink.runtime.clusterframework.types.ResourceID;
 import org.apache.flink.runtime.registration.RegistrationResponse;
-
-import java.util.UUID;
+import org.apache.flink.runtime.resourcemanager.ResourceManagerId;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
-/**
- * Base class for responses from the ResourceManager to a registration attempt by a JobMaster.
- */
+/** Base class for responses from the ResourceManager to a registration attempt by a JobMaster. */
 public class JobMasterRegistrationSuccess extends RegistrationResponse.Success {
 
-	private static final long serialVersionUID = 5577641250204140415L;
+    private static final long serialVersionUID = 5577641250204140415L;
 
-	private final long heartbeatInterval;
+    private final ResourceManagerId resourceManagerId;
 
-	private final UUID resourceManagerLeaderId;
+    private final ResourceID resourceManagerResourceId;
 
-	private final ResourceID resourceManagerResourceId;
+    public JobMasterRegistrationSuccess(
+            final ResourceManagerId resourceManagerId, final ResourceID resourceManagerResourceId) {
+        this.resourceManagerId = checkNotNull(resourceManagerId);
+        this.resourceManagerResourceId = checkNotNull(resourceManagerResourceId);
+    }
 
-	public JobMasterRegistrationSuccess(
-			final long heartbeatInterval,
-			final UUID resourceManagerLeaderId,
-			final ResourceID resourceManagerResourceId) {
-		this.heartbeatInterval = heartbeatInterval;
-		this.resourceManagerLeaderId = checkNotNull(resourceManagerLeaderId);
-		this.resourceManagerResourceId = checkNotNull(resourceManagerResourceId);
-	}
+    public ResourceManagerId getResourceManagerId() {
+        return resourceManagerId;
+    }
 
-	/**
-	 * Gets the interval in which the ResourceManager will heartbeat the JobMaster.
-	 *
-	 * @return the interval in which the ResourceManager will heartbeat the JobMaster
-	 */
-	public long getHeartbeatInterval() {
-		return heartbeatInterval;
-	}
+    public ResourceID getResourceManagerResourceId() {
+        return resourceManagerResourceId;
+    }
 
-	public UUID getResourceManagerLeaderId() {
-		return resourceManagerLeaderId;
-	}
-
-	public ResourceID getResourceManagerResourceId() {
-		return resourceManagerResourceId;
-	}
-
-	@Override
-	public String toString() {
-		return "JobMasterRegistrationSuccess{" +
-			"heartbeatInterval=" + heartbeatInterval +
-			", resourceManagerLeaderId=" + resourceManagerLeaderId +
-			", resourceManagerResourceId=" + resourceManagerResourceId +
-			'}';
-	}
+    @Override
+    public String toString() {
+        return "JobMasterRegistrationSuccess{"
+                + "resourceManagerId="
+                + resourceManagerId
+                + ", resourceManagerResourceId="
+                + resourceManagerResourceId
+                + '}';
+    }
 }

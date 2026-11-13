@@ -22,13 +22,18 @@ import org.apache.flink.runtime.blob.BlobStore;
 import org.apache.flink.runtime.blob.VoidBlobStore;
 import org.apache.flink.runtime.checkpoint.CheckpointRecoveryFactory;
 import org.apache.flink.runtime.checkpoint.StandaloneCheckpointRecoveryFactory;
+import org.apache.flink.runtime.highavailability.ApplicationResultStore;
+import org.apache.flink.runtime.highavailability.EmbeddedApplicationResultStore;
 import org.apache.flink.runtime.highavailability.HighAvailabilityServices;
-import org.apache.flink.runtime.highavailability.RunningJobsRegistry;
-import org.apache.flink.runtime.highavailability.nonha.standalone.StandaloneRunningJobsRegistry;
-import org.apache.flink.runtime.jobmanager.StandaloneSubmittedJobGraphStore;
-import org.apache.flink.runtime.jobmanager.SubmittedJobGraphStore;
+import org.apache.flink.runtime.highavailability.JobResultStore;
+import org.apache.flink.runtime.highavailability.nonha.embedded.EmbeddedJobResultStore;
+import org.apache.flink.runtime.jobmanager.ApplicationStore;
+import org.apache.flink.runtime.jobmanager.ExecutionPlanStore;
+import org.apache.flink.runtime.jobmanager.StandaloneApplicationStore;
+import org.apache.flink.runtime.jobmanager.StandaloneExecutionPlanStore;
 
 import javax.annotation.concurrent.GuardedBy;
+
 import java.io.IOException;
 
 import static org.apache.flink.util.Preconditions.checkState;
@@ -36,90 +41,113 @@ import static org.apache.flink.util.Preconditions.checkState;
 /**
  * Abstract base class for non high-availability services.
  *
- * This class returns the standalone variants for the checkpoint recovery factory, the submitted
- * job graph store, the running jobs registry and the blob store.
+ * <p>This class returns the standalone variants for the checkpoint recovery factory, the submitted
+ * execution plan store, the running jobs registry and the blob store.
  */
 public abstract class AbstractNonHaServices implements HighAvailabilityServices {
-	protected final Object lock = new Object();
+    protected final Object lock = new Object();
 
-	private final RunningJobsRegistry runningJobsRegistry;
+    private final JobResultStore jobResultStore;
 
-	private final VoidBlobStore voidBlobStore;
+    private final ApplicationStore applicationStore;
 
-	private boolean shutdown;
+    private final ApplicationResultStore applicationResultStore;
 
-	public AbstractNonHaServices() {
-		this.runningJobsRegistry = new StandaloneRunningJobsRegistry();
-		this.voidBlobStore = new VoidBlobStore();
+    private final VoidBlobStore voidBlobStore;
 
-		shutdown = false;
-	}
+    private boolean shutdown;
 
-	// ----------------------------------------------------------------------
-	// HighAvailabilityServices method implementations
-	// ----------------------------------------------------------------------
+    public AbstractNonHaServices() {
+        this.jobResultStore = new EmbeddedJobResultStore();
+        this.applicationStore = new StandaloneApplicationStore();
+        this.applicationResultStore = new EmbeddedApplicationResultStore();
+        this.voidBlobStore = new VoidBlobStore();
 
-	@Override
-	public CheckpointRecoveryFactory getCheckpointRecoveryFactory() {
-		synchronized (lock) {
-			checkNotShutdown();
+        shutdown = false;
+    }
 
-			return new StandaloneCheckpointRecoveryFactory();
-		}
-	}
+    // ----------------------------------------------------------------------
+    // HighAvailabilityServices method implementations
+    // ----------------------------------------------------------------------
 
-	@Override
-	public SubmittedJobGraphStore getSubmittedJobGraphStore() throws Exception {
-		synchronized (lock) {
-			checkNotShutdown();
+    @Override
+    public CheckpointRecoveryFactory getCheckpointRecoveryFactory() {
+        synchronized (lock) {
+            checkNotShutdown();
 
-			return new StandaloneSubmittedJobGraphStore();
-		}
-	}
+            return new StandaloneCheckpointRecoveryFactory();
+        }
+    }
 
-	@Override
-	public RunningJobsRegistry getRunningJobsRegistry() throws Exception {
-		synchronized (lock) {
-			checkNotShutdown();
+    @Override
+    public ExecutionPlanStore getExecutionPlanStore() throws Exception {
+        synchronized (lock) {
+            checkNotShutdown();
 
-			return runningJobsRegistry;
-		}
-	}
+            return new StandaloneExecutionPlanStore();
+        }
+    }
 
-	@Override
-	public BlobStore createBlobStore() throws IOException {
-		synchronized (lock) {
-			checkNotShutdown();
+    @Override
+    public JobResultStore getJobResultStore() throws Exception {
+        synchronized (lock) {
+            checkNotShutdown();
 
-			return voidBlobStore;
-		}
-	}
+            return jobResultStore;
+        }
+    }
 
-	@Override
-	public void close() throws Exception {
-		synchronized (lock) {
-			if (!shutdown) {
-				shutdown = true;
-			}
-		}
-	}
+    @Override
+    public ApplicationStore getApplicationStore() throws Exception {
+        synchronized (lock) {
+            checkNotShutdown();
 
-	@Override
-	public void closeAndCleanupAllData() throws Exception {
-		// this stores no data, so this method is the same as 'close()'
-		close();
-	}
+            return applicationStore;
+        }
+    }
 
-	// ----------------------------------------------------------------------
-	// Helper methods
-	// ----------------------------------------------------------------------
+    @Override
+    public ApplicationResultStore getApplicationResultStore() throws Exception {
+        synchronized (lock) {
+            checkNotShutdown();
 
-	@GuardedBy("lock")
-	protected void checkNotShutdown() {
-		checkState(!shutdown, "high availability services are shut down");
-	}
+            return applicationResultStore;
+        }
+    }
 
-	protected boolean isShutDown() {
-		return shutdown;
-	}
+    @Override
+    public BlobStore createBlobStore() throws IOException {
+        synchronized (lock) {
+            checkNotShutdown();
+
+            return voidBlobStore;
+        }
+    }
+
+    @Override
+    public void close() throws Exception {
+        synchronized (lock) {
+            if (!shutdown) {
+                shutdown = true;
+            }
+        }
+    }
+
+    @Override
+    public void cleanupAllData() throws Exception {
+        // this stores no data, do nothing here
+    }
+
+    // ----------------------------------------------------------------------
+    // Helper methods
+    // ----------------------------------------------------------------------
+
+    @GuardedBy("lock")
+    protected void checkNotShutdown() {
+        checkState(!shutdown, "high availability services are shut down");
+    }
+
+    protected boolean isShutDown() {
+        return shutdown;
+    }
 }

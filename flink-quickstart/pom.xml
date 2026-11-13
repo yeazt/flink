@@ -23,26 +23,24 @@ under the License.
 	<parent>
 		<groupId>org.apache.flink</groupId>
 		<artifactId>flink-parent</artifactId>
-		<version>1.4-SNAPSHOT</version>
-		<relativePath>..</relativePath>
+		<version>2.5-SNAPSHOT</version>
 	</parent>
 
 	<artifactId>flink-quickstart</artifactId>
 	<packaging>pom</packaging>
 
-	<name>flink-quickstart</name>
+	<name>Flink : Quickstart : </name>
 	<description>Parent project for different quickstart archetypes for Apache Flink</description>
 
 	<modules>
 		<module>flink-quickstart-java</module>
-		<module>flink-quickstart-scala</module>
 	</modules>
 	<build>
 		<extensions>
 			<extension>
 				<groupId>org.apache.maven.archetype</groupId>
 				<artifactId>archetype-packaging</artifactId>
-				<version>2.2</version>
+				<version>3.4.1</version>
 			</extension>
 		</extensions>
 		<pluginManagement>
@@ -50,14 +48,14 @@ under the License.
 				<plugin>
 					<groupId>org.apache.maven.plugins</groupId>
 					<artifactId>maven-archetype-plugin</artifactId>
-					<version>2.2</version>
+					<version>3.4.1</version>
 				</plugin>
 			</plugins>
 		</pluginManagement>
 		<plugins>
 			<plugin>
 				<artifactId>maven-archetype-plugin</artifactId>
-				<version>2.2</version><!--$NO-MVN-MAN-VER$-->
+				<version>3.4.1</version><!--$NO-MVN-MAN-VER$-->
 				<configuration>
 					<skip>true</skip>
 				</configuration>
@@ -73,14 +71,6 @@ under the License.
 				</executions>
 			</plugin>
 
-			<plugin>
-				<groupId>com.github.siom79.japicmp</groupId>
-				<artifactId>japicmp-maven-plugin</artifactId>
-				<configuration>
-					<skip>true</skip>
-				</configuration>
-			</plugin>
-
 			<!-- use alternative delimiter for filtering resources -->
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
@@ -91,41 +81,6 @@ under the License.
 						<delimiter>@</delimiter>
 					</delimiters>
 				</configuration>
-			</plugin>
-
-			<plugin>
-				<groupId>org.apache.maven.plugins</groupId>
-				<artifactId>maven-checkstyle-plugin</artifactId>
-				<version>2.17</version>
-				<dependencies>
-					<dependency>
-						<groupId>com.puppycrawl.tools</groupId>
-						<artifactId>checkstyle</artifactId>
-						<version>6.19</version>
-					</dependency>
-				</dependencies>
-				<configuration>
-					<configLocation>/tools/maven/strict-checkstyle.xml</configLocation>
-					<suppressionsLocation>/tools/maven/suppressions.xml</suppressionsLocation>
-					<includeTestSourceDirectory>true</includeTestSourceDirectory>
-					<logViolationsToConsole>true</logViolationsToConsole>
-					<failOnViolation>true</failOnViolation>
-				</configuration>
-				<executions>
-					<!--
-					Execute checkstyle after compilation but before tests.
-
-					This ensures that any parsing or type checking errors are from
-					javac, so they look as expected. Beyond that, we want to
-					fail as early as possible.
-					-->
-					<execution>
-						<phase>test-compile</phase>
-						<goals>
-							<goal>check</goal>
-						</goals>
-					</execution>
-				</executions>
 			</plugin>
 		</plugins>
 		<resources>

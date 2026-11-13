@@ -19,43 +19,117 @@
 package org.apache.flink.runtime.deployment;
 
 import org.apache.flink.core.testutils.CommonTestUtils;
+import org.apache.flink.runtime.clusterframework.types.ResourceID;
+import org.apache.flink.runtime.executiongraph.ExecutionAttemptID;
+import org.apache.flink.runtime.io.network.ConnectionID;
+import org.apache.flink.runtime.io.network.partition.ResultPartitionID;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionType;
 import org.apache.flink.runtime.jobgraph.IntermediateDataSetID;
 import org.apache.flink.runtime.jobgraph.IntermediateResultPartitionID;
-import org.junit.Test;
+import org.apache.flink.runtime.shuffle.NettyShuffleDescriptor;
+import org.apache.flink.runtime.shuffle.NettyShuffleDescriptor.NetworkPartitionConnectionInfo;
+import org.apache.flink.runtime.shuffle.PartitionDescriptor;
+import org.apache.flink.runtime.shuffle.ShuffleDescriptor;
+import org.apache.flink.runtime.shuffle.UnknownShuffleDescriptor;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
+import org.junit.jupiter.api.Test;
 
-public class ResultPartitionDeploymentDescriptorTest {
+import java.io.IOException;
+import java.net.InetSocketAddress;
 
-	/**
-	 * Tests simple de/serialization.
-	 */
-	@Test
-	public void testSerialization() throws Exception {
-		// Expected values
-		IntermediateDataSetID resultId = new IntermediateDataSetID();
-		IntermediateResultPartitionID partitionId = new IntermediateResultPartitionID();
-		ResultPartitionType partitionType = ResultPartitionType.PIPELINED;
-		int numberOfSubpartitions = 24;
+import static org.apache.flink.runtime.executiongraph.ExecutionGraphTestUtils.createExecutionAttemptId;
+import static org.assertj.core.api.Assertions.assertThat;
 
-		ResultPartitionDeploymentDescriptor orig =
-				new ResultPartitionDeploymentDescriptor(
-						resultId,
-						partitionId,
-						partitionType,
-						numberOfSubpartitions,
-						numberOfSubpartitions,
-						true);
+/** Tests for the {@link ResultPartitionDeploymentDescriptor}. */
+class ResultPartitionDeploymentDescriptorTest {
+    private static final IntermediateDataSetID resultId = new IntermediateDataSetID();
+    private static final int numberOfPartitions = 5;
 
-		ResultPartitionDeploymentDescriptor copy =
-				CommonTestUtils.createCopySerializable(orig);
+    private static final IntermediateResultPartitionID partitionId =
+            new IntermediateResultPartitionID();
+    private static final ExecutionAttemptID producerExecutionId = createExecutionAttemptId();
 
-		assertEquals(resultId, copy.getResultId());
-		assertEquals(partitionId, copy.getPartitionId());
-		assertEquals(partitionType, copy.getPartitionType());
-		assertEquals(numberOfSubpartitions, copy.getNumberOfSubpartitions());
-		assertTrue(copy.sendScheduleOrUpdateConsumersMessage());
-	}
+    private static final ResultPartitionType partitionType = ResultPartitionType.PIPELINED;
+    private static final int numberOfSubpartitions = 24;
+
+    private static final int consumerParallelism = 12;
+    private static final int connectionIndex = 10;
+    private static final boolean isBroadcast = false;
+    private static final boolean isAllToAllDistribution = true;
+
+    private static final PartitionDescriptor partitionDescriptor =
+            new PartitionDescriptor(
+                    resultId,
+                    numberOfPartitions,
+                    partitionId,
+                    partitionType,
+                    numberOfSubpartitions,
+                    connectionIndex,
+                    isBroadcast,
+                    isAllToAllDistribution,
+                    false);
+
+    private static final ResultPartitionID resultPartitionID =
+            new ResultPartitionID(partitionId, producerExecutionId);
+
+    private static final ResourceID producerLocation = new ResourceID("producerLocation");
+    private static final InetSocketAddress address = new InetSocketAddress("localhost", 10000);
+    private static final ConnectionID connectionID =
+            new ConnectionID(producerLocation, address, connectionIndex);
+
+    /** Tests simple de/serialization with {@link UnknownShuffleDescriptor}. */
+    @Test
+    void testSerializationOfUnknownShuffleDescriptor() throws IOException {
+        ShuffleDescriptor shuffleDescriptor = new UnknownShuffleDescriptor(resultPartitionID);
+        ShuffleDescriptor shuffleDescriptorCopy =
+                CommonTestUtils.createCopySerializable(shuffleDescriptor);
+        assertThat(shuffleDescriptorCopy).isInstanceOf(UnknownShuffleDescriptor.class);
+        assertThat(resultPartitionID).isEqualTo(shuffleDescriptorCopy.getResultPartitionID());
+        assertThat(shuffleDescriptorCopy.isUnknown()).isTrue();
+    }
+
+    /** Tests simple de/serialization with {@link NettyShuffleDescriptor}. */
+    @Test
+    void testSerializationWithNettyShuffleDescriptor() throws IOException {
+        ShuffleDescriptor shuffleDescriptor =
+                new NettyShuffleDescriptor(
+                        producerLocation,
+                        new NetworkPartitionConnectionInfo(address, connectionIndex),
+                        resultPartitionID);
+
+        ResultPartitionDeploymentDescriptor copy =
+                createCopyAndVerifyResultPartitionDeploymentDescriptor(shuffleDescriptor);
+
+        assertThat(copy.getShuffleDescriptor()).isInstanceOf(NettyShuffleDescriptor.class);
+        NettyShuffleDescriptor shuffleDescriptorCopy =
+                (NettyShuffleDescriptor) copy.getShuffleDescriptor();
+        assertThat(resultPartitionID).isEqualTo(shuffleDescriptorCopy.getResultPartitionID());
+        assertThat(shuffleDescriptorCopy.isUnknown()).isFalse();
+        assertThat(shuffleDescriptorCopy.isLocalTo(producerLocation)).isTrue();
+        assertThat(connectionID).isEqualTo(shuffleDescriptorCopy.getConnectionId());
+    }
+
+    private static ResultPartitionDeploymentDescriptor
+            createCopyAndVerifyResultPartitionDeploymentDescriptor(
+                    ShuffleDescriptor shuffleDescriptor) throws IOException {
+        ResultPartitionDeploymentDescriptor orig =
+                new ResultPartitionDeploymentDescriptor(
+                        partitionDescriptor,
+                        shuffleDescriptor,
+                        numberOfSubpartitions,
+                        consumerParallelism);
+        ResultPartitionDeploymentDescriptor copy = CommonTestUtils.createCopySerializable(orig);
+        verifyResultPartitionDeploymentDescriptorCopy(copy);
+        return copy;
+    }
+
+    private static void verifyResultPartitionDeploymentDescriptorCopy(
+            ResultPartitionDeploymentDescriptor copy) {
+        assertThat(resultId).isEqualTo(copy.getResultId());
+        assertThat(numberOfPartitions).isEqualTo(copy.getTotalNumberOfPartitions());
+        assertThat(partitionId).isEqualTo(copy.getPartitionId());
+        assertThat(partitionType).isEqualTo(copy.getPartitionType());
+        assertThat(numberOfSubpartitions).isEqualTo(copy.getNumberOfSubpartitions());
+        assertThat(consumerParallelism).isEqualTo(copy.getConsumerParallelism());
+    }
 }

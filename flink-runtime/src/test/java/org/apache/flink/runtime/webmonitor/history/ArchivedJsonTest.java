@@ -15,23 +15,36 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.flink.runtime.webmonitor.history;
 
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
-public class ArchivedJsonTest {
+import static org.assertj.core.api.Assertions.assertThat;
 
-	@Test
-	public void testEquals() {
-		ArchivedJson original = new ArchivedJson("path", "json");
-		ArchivedJson twin = new ArchivedJson("path", "json");
-		ArchivedJson identicalPath = new ArchivedJson("path", "hello");
-		ArchivedJson identicalJson = new ArchivedJson("hello", "json");
+/** Tests for the {@link ArchivedJson}. */
+class ArchivedJsonTest {
 
-		Assert.assertEquals(original, original);
-		Assert.assertEquals(original, twin);
-		Assert.assertNotEquals(original, identicalPath);
-		Assert.assertNotEquals(original, identicalJson);
-	}
+    @Test
+    void testEquals() {
+        ArchivedJson original = new ArchivedJson("path", "json");
+        ArchivedJson twin = new ArchivedJson("path", "json");
+        ArchivedJson identicalPath = new ArchivedJson("path", "hello");
+        ArchivedJson identicalJson = new ArchivedJson("hello", "json");
+
+        assertThat(original).isEqualTo(original);
+        assertThat(twin).isEqualTo(original);
+        assertThat(identicalPath).isNotEqualTo(original);
+        assertThat(identicalJson).isNotEqualTo(original);
+    }
+
+    @Test
+    void testHashCode() {
+        ArchivedJson original = new ArchivedJson("path", "json");
+        ArchivedJson twin = new ArchivedJson("path", "json");
+
+        assertThat(original).isEqualTo(original);
+        assertThat(twin).isEqualTo(original);
+        assertThat(twin).hasSameHashCodeAs(original);
+    }
 }
